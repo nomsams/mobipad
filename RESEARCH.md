@@ -18,6 +18,10 @@ Local touch latency and distributed timing are different problems. A touch previ
 
 Clock offset uses request/response midpoint measurements and low-round-trip samples. Asymmetric paths can bias this. Acoustic calibration detects a known three-tone sequence to estimate the remaining phase; input processing, latency estimates, reverberation and distance introduce uncertainty. Manual alignment remains available.
 
-Arbitrary music import is supported. Tempo detection and pitch-preserving time stretching are not implemented. Users specify the clip's bar length; speed resampling fits it to the session and changes pitch. This keeps playback deterministic and browser-only.
+The expanded engine detects tempo from onset-envelope autocorrelation with half/double-time candidates, and estimates key from FFT chroma and major/minor profile correlation. These are confidence-labeled estimates. SoundTouchJS core 2.1.1 supplies WSOLA stretching in a background worker, retaining pitch while fitting exact loop durations. Active clips prepare before a shared tempo switch; phase is preserved through the transition.
+
+The string engine uses fractional-delay Karplus–Strong synthesis with pluck-position excitation, damping, pickup/body filtering and optional saturation. This follows the family of physical models described by [Tone.js PluckSynth](https://tonejs.github.io/docs/15.1.22/classes/PluckSynth.html), implemented here without Tone.js. [SoundTouchJS](https://github.com/cutterbl/SoundTouchJS) provides the stretch algorithm.
+
+Smart recording alignment measures attack phases on a sixteenth-note circle and uses weighted circular mean/coherence to estimate a consistent small offset. It requires at least three attacks and 82% phase coherence, caps correction at 75 ms or 42% of a sixteenth, and leaves ambiguous/sustained material unchanged. A non-destructive circular shift preserves loop duration, with a manual override. It cannot infer arbitrary musical intent or resolve every Bluetooth/input delay.
 
 Additional workflow features include tap tempo, odd meters, swing, scale highlighting, autosave, self-contained backups, mix recording, offline caching, a limiter, and a screen wake lock.

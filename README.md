@@ -17,10 +17,13 @@ Open **http://localhost:5173**. Audio starts on the first interaction. Microphon
 ## Play
 
 - **Launchpad:** 16 color-coded pads. Loops toggle at the next bar or beat. One shots respond immediately. The instant launch option uses the nearest upcoming sixteenth. Double-tap or hold a populated pad to rename it, change its level or audio length, import, record, or clear it. Tap an empty pad to add a sound.
-- **Instruments:** synthesized piano, bass, guitar, and synth with octave changes and chromatic/major/minor/pentatonic keyboards. Eight finger drums, including a triangle. Capture records quantized note events after a one-bar count-in; the chosen number of bars closes automatically.
-- **Sequencer:** sixteenth-note drum patterns, odd meters, three starter rhythms, swing, and save-to-pad.
-- **Microphone:** unprocessed mono PCM capture through an AudioWorklet; no live monitoring, to avoid feedback. Recording is count-in aligned and trimmed to exact bar length. Configurable input compensation accounts for microphone delay. Use headphones while capturing over an existing groove.
-- **Import:** browser-decodable audio up to 25 MB / 10 minutes per sample. The app estimates a nearby bar count; set its actual length in the pad editor. Clips follow tempo through playback speed, **which also changes pitch**. There is no pitch-preserving time stretch or automatic beat detection.
+- **Instruments:** synthesized piano, bass, guitar, and synth with octave changes and chromatic/major/minor/pentatonic keyboards. Eight finger drums, including a triangle. Capture starts on the next beat, with optional one-beat or one-bar count-ins. The chosen number of bars closes automatically. Guitar and bass have playable string fretboards, strum direction/spread and chord pads, with physically modeled plucked strings.
+- **Sequencer:** drum and imported-sample lanes, odd meters, swing, and save-to-pad. Left-click adds a hit; right-click removes it. Erase mode supports touchscreens. Sample lanes expose trim and delay editing.
+- **Microphone:** unprocessed mono PCM capture through an AudioWorklet; no live monitoring, to avoid feedback. Recording is beat-aligned and trimmed to exact bar length; completed takes rejoin at their current loop phase instead of waiting another bar. Smart alignment detects consistent attack offsets against sixteenths, applies small reversible corrections only at high confidence, and shows the result in the waveform editor. Configurable input compensation accounts for microphone delay. Use headphones while capturing over an existing groove.
+- **Import:** browser-decodable audio up to 25 MB / 10 minutes per sample. BPM, alternative tempo interpretations, and musical key are analyzed in a background worker. Click a detected BPM to propose it for the whole session. Loop length is estimated from the detected tempo and can be edited. SoundTouch WSOLA time stretching fits loops to tempo **without transposing pitch**. Playing loops are prepared before a shared tempo switch; dormant loops prepare when launched. Detected BPM/key are estimates, particularly on short, percussive, expressive or harmonically ambiguous clips. Large tempo changes may introduce stretching artifacts.
+- **Sounds:** 57 voice/preset combinations: nylon, steel, clean, muted and driven guitar; finger, pick, slap, muted and sub bass; five synth voices; piano variations; and 808, 909, acoustic, tape and club drum kits. Individual drums can be changed independently. Synth filter, resonance, attack, release and detune controls are captured with notes.
+- **Arpeggiator:** up/down/as-played/seeded-random patterns, quarter to thirty-second notes, triplets, 1–3 octaves, gate, latch, and five ready-made recipes. Arpeggios can be captured into loops while preserving triplet timing.
+- **Sample editing:** quick selected-pad volume and clear controls, waveform trimming, silence trim, manual timing nudge, start predelay, echo amount and echo time. Original source audio is preserved.
 - **Presets:** four original synthesized packs: After hours, Dusty corners, Neon current, and Sunset club. No licensed music or fetched sound assets.
 - **Mix:** mute and level controls, master limiter, and downloadable live mix recording in the browser's MediaRecorder format (usually WebM or M4A).
 - **Projects:** IndexedDB autosave, JSON export including audio, and import. A new session first downloads a backup. Samples remain in the local library. Browser storage may be cleared or evicted; export backups.
@@ -65,7 +68,7 @@ npm test
 
 Tests cover timeline math, launch boundaries, quantization, clock estimation, WAV encoding, preset validation, odd meters, microphone trimming, muted scheduling, command deduplication, and transfer limits. Browser/device checks: [QA.md](QA.md).
 
-PeerJS 1.5.5 and QRCode 1.5.4 are pinned and vendored with MIT licenses. Development-only esbuild bundles QRCode. Rebuild with:
+PeerJS 1.5.5 and QRCode 1.5.4 are pinned and vendored with MIT licenses. SoundTouchJS core 2.1.1 is vendored under MPL-2.0 with its license. Its unmodified upstream source is available from [SoundTouchJS](https://github.com/cutterbl/SoundTouchJS) and the pinned npm package. Development-only esbuild bundles QRCode and the SoundTouch stretch stage. Rebuild with:
 
 ```sh
 npm ci

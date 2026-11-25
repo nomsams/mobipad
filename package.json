@@ -11,6 +11,7 @@
     "vendor": "node scripts/vendor.mjs"
   },
   "devDependencies": {
+    "@soundtouchjs/core": "2.1.1",
     "esbuild": "0.25.12",
     "peerjs": "1.5.5",
     "qrcode": "1.5.4"

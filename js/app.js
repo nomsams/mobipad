@@ -1,11 +1,22 @@
+import { analyzeBuffer } from "./dsp-client.js";
+import { bindStepEditing } from "./sequence-input.js";
 import { AudioEngine } from "./engine.js";
 import { defaultSession, validateSession, makePads, packs, padKeys, drums, drumNames, pattern, resizePattern, colors } from "./presets.js";
 import { clamp, nextBoundary, quantizeBeat, beatDuration } from "./timing.js";
 import { loadSession, saveSession, getSamples, saveSample, deleteSample, download, exportProject } from "./storage.js";
 import { JamRoom } from "./jam.js";
+import { InstrumentRack } from "./instrument-rack.js";
+import { soundBank, drumKits, validSound, validTone } from "./sounds.js";
+import { analyzeRecording, trimSilence, planRecording, validSampleSettings } from "./sample-analysis.js";
 const $ = (s) => document.querySelector(s), $$ = (s) => [...document.querySelectorAll(s)];
+let seqErase = false;
+let tempoTimer = null, tempoPreparing = false;
 let session = defaultSession(), samples = [], view = "pads", mode = "loop", instrument = "piano", octave = 4, selected = 12, saveTimer, toastTimer, restoring = false, recording = null, mixRecorder = null, wakeLock = null, writing = false;
 const audio = new AudioEngine(session), jam = new JamRoom();
+const rack = new InstrumentRack({ audio, getSession: () => session, ready, perform: performNote, changed, notify: toast, onVoice: (v) => instrument = v, changeSound: (voice, id) => sendAction({ type: "sound", voice, id }), changeKit: (id) => sendAction({ type: "kit", id }), startTransport: () => {
+  if (jam.role === "follower") throw new Error("The leader needs to start the transport for the arpeggiator.");
+  sendAction({ type: "start", epoch: audio.now() + 180 });
+} });
 const palette = { coral: "#eea08b", lime: "#caee91", teal: "#88c8be", purple: "#b3a1d6" };
 function toast(message, error = false) {
   $("#toast").textContent = message;
@@ -48,6 +59,7 @@ async function ready() {
   $("#latency-info").textContent = `Sample rate: ${audio.ctx.sampleRate.toLocaleString()} Hz. Base latency: ${Math.round((audio.ctx.baseLatency || 0) * 1e3)} ms. Output estimate: ${Math.round((audio.ctx.outputLatency || 0) * 1e3)} ms. Hardware and Bluetooth can add more delay.`;
 }
 function switchView(name) {
+  if (view === "instruments" && name !== view) rack.releaseAll();
   view = name;
   $$(".view").forEach((e) => e.hidden = e.id !== "view-" + name);
   $$("[data-view]").forEach((e) => e.classList.toggle("active", e.dataset.view === name));
@@ -95,6 +107,7 @@ function renderPads() {
       b.setPointerCapture(e.pointerId);
       down = Date.now();
       selected = i;
+      renderQuickPad();
       if (p.kind === "empty") {
         openPad(i);
         return;
@@ -122,6 +135,7 @@ function renderPads() {
   renderPadStates();
 }
 function renderPadStates() {
+  renderQuickPad();
   for (const b of $$(".pad")) {
     const id = Number(b.dataset.id);
     b.classList.toggle("is-playing", audio.active.has(id));
@@ -153,6 +167,7 @@ function renderMixer() {
     slider.max = 100;
     slider.value = p.volume * 100;
     slider.setAttribute("aria-label", p.name + " volume");
+    slider.dataset.padId = id;
     slider.oninput = () => {
       p.volume = Number(slider.value) / 100;
       audio.setPadVolume(id, p.volume);
@@ -205,14 +220,12 @@ function renderSequencer() {
       b.setAttribute("aria-label", `${drumNames[voice]}, step ${i + 1}`);
       b.setAttribute("aria-pressed", String(on));
       b.dataset.step = i;
-      b.onclick = attempt(async () => {
-        await ready();
-        sendAction({ type: "step", voice, index: i, on: !session.pattern[voice][i] });
-      });
+      bindStepEditing(b, (on2) => sendAction({ type: "step", voice, index: i, on: on2 }), () => seqErase);
       row.append(b);
     });
     c.append(row);
   }
+  renderSampleSequencer();
 }
 function renderLibrary() {
   const c = $("#preset-library");
@@ -249,7 +262,10 @@ function renderLibrary() {
       audio.buffers.delete(s.id);
       renderLibrary();
     });
-    row.append(name, info, assign, del);
+    const detected = make("button", "", s.analysis?.bpm ? Math.round(s.analysis.bpm) + " BPM" : "Analyze");
+    detected.onclick = attempt(() => openTempoSuggestion(s.id));
+    if (s.analysis?.key && s.analysis.keyConfidence > 0.15) info.textContent += " · " + s.analysis.key;
+    row.append(name, info, detected, assign, del);
     sc.append(row);
   }
 }
@@ -259,60 +275,10 @@ function emptyPad() {
   return index;
 }
 function renderKeyboard() {
-  const c = $("#keyboard");
-  c.replaceChildren();
-  const whites = [0, 2, 4, 5, 7, 9, 11, 12], black = [{ n: 1, x: 1 }, { n: 3, x: 2 }, { n: 6, x: 4 }, { n: 8, x: 5 }, { n: 10, x: 6 }];
-  const names = ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"];
-  const scales = { major: [0, 2, 4, 5, 7, 9, 11], minor: [0, 2, 3, 5, 7, 8, 10], pentatonic: [0, 2, 4, 7, 9] };
-  const scale = scales[$("#scale").value];
-  const add = (n, isBlack, x) => {
-    const b = make("button", "piano-key" + (isBlack ? " black" : "") + (scale && !scale.includes(n % 12) ? " out-scale" : ""), names[n % 12] + (n % 12 === 0 ? octave + Math.floor(n / 12) : ""));
-    b.dataset.note = octave * 12 + 12 + n;
-    if (isBlack) b.style.left = x / 8 * 100 + "%";
-    b.setAttribute("aria-label", names[n % 12] + " octave " + (octave + Math.floor(n / 12)));
-    b.onpointerdown = attempt(async (e) => {
-      e.preventDefault();
-      b.setPointerCapture(e.pointerId);
-      if (scale && !scale.includes(n % 12)) return;
-      await playInstrument(Number(b.dataset.note));
-      b.classList.add("pressed");
-    });
-    const up = () => b.classList.remove("pressed");
-    b.onpointerup = up;
-    b.onpointercancel = up;
-    b.onlostpointercapture = up;
-    b.onkeydown = attempt(async (e) => {
-      if (e.key === " " || e.key === "Enter") {
-        e.preventDefault();
-        if (!e.repeat) await playInstrument(Number(b.dataset.note));
-      }
-    });
-    c.append(b);
-  };
-  whites.forEach((n) => add(n, false));
-  black.forEach((x) => add(x.n, true, x.x));
-  $("#octave").textContent = octave;
+  rack.renderKeyboard();
 }
 function renderDrums() {
-  const c = $("#drum-kit");
-  c.replaceChildren();
-  drums.forEach((voice) => {
-    const b = make("button", "drum-hit", drumNames[voice]);
-    b.onpointerdown = attempt(async (e) => {
-      e.preventDefault();
-      b.setPointerCapture(e.pointerId);
-      await playInstrument(60, voice);
-      b.classList.add("pressed");
-    });
-    b.onpointerup = b.onpointercancel = () => b.classList.remove("pressed");
-    b.onkeydown = attempt(async (e) => {
-      if ((e.key === " " || e.key === "Enter") && !e.repeat) {
-        e.preventDefault();
-        await playInstrument(60, voice);
-      }
-    });
-    c.append(b);
-  });
+  rack.renderDrums();
 }
 function renderAll() {
   audio.session = session;
@@ -322,29 +288,206 @@ function renderAll() {
   renderPads();
   renderSequencer();
   renderLibrary();
-  renderKeyboard();
-  renderDrums();
+  rack.render();
   $("#mixer").dataset.ids = "";
   renderMixer();
 }
-function openPad(id) {
+function renderQuickPad() {
+  for (const input of $$("#mixer input[data-pad-id]")) if (input !== document.activeElement) input.value = session.pads[Number(input.dataset.padId)].volume * 100;
+  const p = session.pads[selected];
+  if (!p) return;
+  $("#selected-pad-name").textContent = `Pad ${selected + 1} · ${p.name}`;
+  $("#quick-pad-volume").value = Math.round(p.volume * 100);
+  $("#quick-pad-clear").disabled = p.kind === "empty";
+  const detected = samples.find((s) => s.id === p.audioId)?.analysis || p.trackAnalysis;
+  $("#quick-sample-bpm").hidden = !p.audioId;
+  $("#quick-sample-bpm").textContent = detected?.bpm ? Math.round(detected.bpm) + " BPM" : "Analyze BPM";
+  for (const b of $$(".pad")) b.classList.toggle("selected", Number(b.dataset.id) === selected);
+}
+function clearSelectedPad() {
+  sendAction({ type: "setpad", pad: { id: selected, name: "Add a sound", color: colors[selected % 4], events: [], audioId: null, volume: 0.75, bars: session.bars, kind: "empty" } });
+}
+bind("#quick-pad-volume", "input", () => {
+  const volume = Number($("#quick-pad-volume").value) / 100;
+  session.pads[selected].volume = volume;
+  audio.setPadVolume(selected, volume);
+  changed();
+});
+bind("#quick-pad-volume", "change", () => sendAction({ type: "padlevel", id: selected, volume: Number($("#quick-pad-volume").value) / 100 }));
+bind("#quick-sample-bpm", "click", () => openTempoSuggestion(session.pads[selected].audioId));
+bind("#quick-pad-edit", "click", () => openPad(selected));
+bind("#quick-pad-clear", "click", clearSelectedPad);
+function renderDetection(p) {
+  const sample = samples.find((s) => s.id === p.audioId), a = sample?.analysis || p.trackAnalysis;
+  $("#sample-bpm").textContent = a?.bpm ? `${Math.round(a.bpm)} BPM · ${a.bpmConfidence < 0.35 ? "tentative" : "detected"}` : "Analyze BPM & key";
+  $("#sample-key").textContent = a?.key && a.keyConfidence > 0.15 ? `${a.key} · ${Math.round(a.keyConfidence * 100)}%` : "KEY · UNCERTAIN";
+}
+async function openTempoSuggestion(audioId) {
+  if (jam.role === "follower") throw new Error("The room leader controls the session tempo.");
+  const sample = samples.find((s) => s.id === audioId);
+  if (!sample) throw new Error("No sample selected.");
+  await ready();
+  if (!sample.analysis) {
+    toast("Analyzing BPM and key…");
+    sample.analysis = await analyzeBuffer(audio.buffers.get(audioId));
+    await saveSample(sample);
+    renderLibrary();
+  }
+  const a = sample.analysis;
+  $("#tempo-suggestion").textContent = `${sample.name}: ${a.bpm ? Math.round(a.bpm) + " BPM estimated" : "no stable BPM detected"}${a.key && a.keyConfidence > 0.15 ? " · " + a.key : " · key uncertain"}. Current session: ${session.bpm} BPM. Half-time and double-time interpretations are common; choose what fits.`;
+  $("#suggested-bpm").value = a.bpm || session.bpm;
+  const choices = $("#bpm-candidates");
+  choices.replaceChildren();
+  for (const candidate of a.candidates || []) {
+    const button = make("button", "button subtle", candidate.bpm + " BPM");
+    button.onclick = () => $("#suggested-bpm").value = candidate.bpm;
+    choices.append(button);
+  }
+  $("#tempo-dialog").showModal();
+}
+bind("#sample-bpm", "click", () => openTempoSuggestion(session.pads[selected].audioId));
+bind("#apply-sample-tempo", "click", async () => {
+  $("#bpm").value = clamp($("#suggested-bpm").value, 40, 240);
+  toast("Preparing loops. Original pitch stays locked.");
+  await changeTiming();
+  $("#tempo-dialog").close();
+});
+function openSampleEditor(p) {
+  const buffer = audio.buffers.get(p.audioId);
+  $("#sample-editor").hidden = !p.audioId;
+  renderDetection(p);
+  if (!p.audioId) return;
+  $("#sample-trim-start").value = (p.trimStart || 0).toFixed(3);
+  $("#sample-trim-end").value = (p.trimEnd || buffer?.duration || 0).toFixed(3);
+  $("#sample-predelay").value = p.preDelay || 0;
+  $("#sample-echo").value = (p.echo || 0) * 100;
+  $("#sample-echo-time").value = (p.echoTime || 0.25) * 1e3;
+  $("#sample-nudge").value = p.alignment?.manual || 0;
+  $("#sample-smart-align").checked = Boolean(p.alignment?.enabled);
+  const a = p.alignment;
+  $("#alignment-report").textContent = a?.onsets?.length ? `${a.onsets.length} attacks detected · ${Math.round(a.confidence * 100)}% grid consistency. ${a.shift ? `${a.shift > 0 ? "Advance" : "Delay"} ${Math.abs(a.shift)} ms to align.` : a.reason || "No automatic shift needed."} Positive manual nudge delays playback.` : "No timing analysis for this sound. Manual nudge shifts the loop; positive values play later.";
+  drawSampleWaveform();
+}
+function readSampleEditor() {
+  const p = session.pads[selected], buffer = audio.buffers.get(p.audioId), end = Number($("#sample-trim-end").value);
+  const edit = { trimStart: Number($("#sample-trim-start").value), trimEnd: end, preDelay: Number($("#sample-predelay").value), echo: Number($("#sample-echo").value) / 100, echoTime: Number($("#sample-echo-time").value) / 1e3, alignment: { ...p.alignment || { shift: 0, confidence: 0 }, enabled: $("#sample-smart-align").checked, manual: Number($("#sample-nudge").value) } };
+  if (!validSampleSettings(edit) || !buffer || end > buffer.duration + 2e-3 || end - edit.trimStart < 0.015) throw new Error("Choose a valid audio region of at least 15 ms and timing values within the displayed limits.");
+  return edit;
+}
+function drawSampleWaveform() {
+  const p = session.pads[selected], buffer = audio.buffers.get(p.audioId), canvas = $("#sample-waveform"), ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!buffer) return;
+  const data = buffer.getChannelData(0), w = canvas.width, h = canvas.height;
+  ctx.fillStyle = "#88c8be";
+  for (let x = 0; x < w; x++) {
+    const start = Math.floor(x / w * data.length), end = Math.max(start + 1, Math.floor((x + 1) / w * data.length));
+    let peak = 0;
+    for (let i = start; i < end; i++) peak = Math.max(peak, Math.abs(data[i]));
+    ctx.fillRect(x, h / 2 - peak * h * 0.45, 1, Math.max(1, peak * h * 0.9));
+  }
+  const trimStart = Number($("#sample-trim-start").value) || 0, trimEnd = Number($("#sample-trim-end").value) || buffer.duration;
+  ctx.fillStyle = "#080d0caa";
+  ctx.fillRect(0, 0, trimStart / buffer.duration * w, h);
+  ctx.fillRect(trimEnd / buffer.duration * w, 0, w, h);
+  if (p.alignment?.onsets) {
+    ctx.strokeStyle = "#eea08b88";
+    for (const hit of p.alignment.onsets.slice(0, 256)) {
+      if (!Number.isFinite(hit.time)) continue;
+      const x = hit.time / buffer.duration * w;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, h);
+      ctx.stroke();
+    }
+    const grid = 60 / (p.alignment.bpm || session.bpm) / 4;
+    ctx.strokeStyle = "#caee9144";
+    for (let t = 0; t < buffer.duration; t += grid) {
+      const x = t / buffer.duration * w;
+      ctx.beginPath();
+      ctx.moveTo(x, h - 20);
+      ctx.lineTo(x, h);
+      ctx.stroke();
+    }
+  }
+}
+for (const id of ["#sample-trim-start", "#sample-trim-end"]) bind(id, "input", drawSampleWaveform);
+bind("#sample-autotrim", "click", () => {
+  const p = session.pads[selected], buffer = audio.buffers.get(p.audioId);
+  if (!buffer) throw new Error("Load audio before trimming.");
+  const region = trimSilence(buffer.getChannelData(0), buffer.sampleRate);
+  $("#sample-trim-start").value = region.start.toFixed(3);
+  $("#sample-trim-end").value = region.end.toFixed(3);
+  drawSampleWaveform();
+});
+bind("#sample-preview", "click", async () => {
+  await ready();
+  audio.previewSample(selected, readSampleEditor());
+});
+function renderSampleSequencer() {
+  const container = $("#sample-sequencer");
+  if (!container) return;
+  container.replaceChildren();
+  const pads = session.pads.filter((p) => p.audioId);
+  if (!pads.length) return;
+  container.append(make("h3", "sample-seq-heading", "YOUR SAMPLES · retrigger, move, and edit"));
+  container.append(make("p", "view-note", "Enable Play pattern above. Each lit step starts the trimmed sample; a new trigger cuts its previous hit."));
+  for (const p of pads) {
+    const wrap = make("div", "sample-seq-row"), title = make("div", "sample-seq-title"), label = make("label"), check = make("input");
+    check.type = "checkbox";
+    check.checked = Boolean(p.sequenceEnabled);
+    check.setAttribute("aria-label", p.name + " sequencer enabled");
+    check.onchange = () => sendAction({ type: "sampleseq", id: p.id, on: check.checked });
+    label.append(check, document.createTextNode(p.name));
+    const edit = make("button", "text-button", "Edit / trim / delay");
+    edit.onclick = () => openPad(p.id);
+    title.append(label, edit);
+    const scroll = make("div", "sequencer-scroll"), row = make("div", "seq-row");
+    row.style.setProperty("--steps", session.beats * 4);
+    row.append(make("span", "", "Sample"));
+    for (let i = 0; i < session.beats * 4; i++) {
+      const b = make("button", "seq-step" + (p.steps?.[i] ? " on" : ""));
+      b.dataset.step = i;
+      b.setAttribute("aria-label", `${p.name}, step ${i + 1}`);
+      b.setAttribute("aria-pressed", String(Boolean(p.steps?.[i])));
+      bindStepEditing(b, (on) => sendAction({ type: "samplestep", id: p.id, index: i, on }), () => seqErase);
+      row.append(b);
+    }
+    scroll.append(row);
+    wrap.append(title, scroll);
+    container.append(wrap);
+  }
+}
+async function openPad(id) {
   selected = id;
+  renderQuickPad();
   const p = session.pads[id];
+  if (p.audioId) {
+    try {
+      await ready();
+    } catch (error) {
+      toast(error.message, true);
+      return;
+    }
+  }
   $("#pad-name").value = p.kind === "empty" ? "" : p.name;
   $("#pad-level").value = p.volume * 100;
   $("#pad-bars").value = p.bars;
-  $("#pad-detail").textContent = p.kind === "empty" ? "Import audio, record a sound, or capture an instrument to fill this pad." : p.audioId ? "Audio fits to this many bars by playback speed. Pitch changes with tempo." : `${p.events.length} notes · ${p.kind === "shot" ? "one shot" : "musical loop"}`;
+  $("#pad-detail").textContent = p.kind === "empty" ? "Import audio, record a sound, or capture an instrument to fill this pad." : p.audioId ? "Audio fits to this many bars using pitch-preserving time stretching." : `${p.events.length} notes · ${p.kind === "shot" ? "one shot" : "musical loop"}`;
+  openSampleEditor(p);
   $("#pad-dialog").showModal();
 }
 async function triggerPad(id) {
   await ready();
+  if (session.pads[id].audioId && mode !== "shot") await audio.preparePad(id);
   const p = session.pads[id];
+  if (p.kind === "empty") return;
   if (mode === "shot" || p.kind === "shot") {
     const e = { type: "shot", id, at: audio.now() + session.jamBuffer };
     if (jam.role) {
-      sendAction(e);
-      audio.oneShot(id);
       localShots.add(e.at + ":" + id);
+      audio.oneShot(id);
+      sendAction(e);
     } else audio.oneShot(id);
     return;
   }
@@ -376,15 +519,25 @@ function validateAction(a, remote = false) {
     case "pack":
       return !remote && packs.some((p) => p.id === a.id);
     case "pad":
-      return id && typeof a.on === "boolean" && Number.isFinite(a.beat) && a.beat >= audio.position() - 1 && a.beat < audio.position() + 128;
+      return id && typeof a.on === "boolean" && Number.isFinite(a.beat) && a.beat >= audio.position() - (a.catchUp === true ? 128 : 1) && a.beat < audio.position() + 128;
     case "shot":
       return id && Number.isFinite(a.at) && Math.abs(a.at - audio.now()) < 5e3;
     case "note":
-      return ["piano", "bass", "guitar", "synth", "bell", ...drums].includes(a.voice) && Number.isFinite(a.note) && a.note >= 0 && a.note <= 127 && Number.isFinite(a.at) && Math.abs(a.at - audio.now()) < 5e3;
+      return validSound(a.voice, a.sound) && validTone(a.tone) && (a.duration === void 0 || Number.isFinite(a.duration) && a.duration > 0 && a.duration <= 30) && (a.velocity === void 0 || Number.isFinite(a.velocity) && a.velocity >= 0 && a.velocity <= 1) && ["piano", "bass", "guitar", "synth", "bell", ...drums].includes(a.voice) && Number.isFinite(a.note) && a.note >= 0 && a.note <= 127 && Number.isFinite(a.at) && Math.abs(a.at - audio.now()) < 5e3;
+    case "sound":
+      return Boolean(soundBank[a.voice]?.some((p) => p.id === a.id));
+    case "kit":
+      return drumKits.some((p) => p.id === a.id);
     case "step":
       return ["kick", "snare", "hat", "clap"].includes(a.voice) && Number.isInteger(a.index) && a.index >= 0 && a.index < session.beats * 4 && typeof a.on === "boolean";
     case "pattern":
       return typeof a.enabled === "boolean" && Number.isFinite(a.swing) && a.swing >= 0 && a.swing <= 60;
+    case "padlevel":
+      return id && Number.isFinite(a.volume) && a.volume >= 0 && a.volume <= 1;
+    case "samplestep":
+      return id && Number.isInteger(a.index) && a.index >= 0 && a.index < session.beats * 4 && typeof a.on === "boolean";
+    case "sampleseq":
+      return id && typeof a.on === "boolean";
     case "setpad":
       try {
         const copy = structuredClone(session);
@@ -415,6 +568,14 @@ function applyAction(a) {
       renderPadStates();
       break;
     case "timing": {
+      if (a.switchAt > audio.now() + 5) {
+        clearTimeout(tempoTimer);
+        tempoTimer = setTimeout(() => {
+          tempoTimer = null;
+          applyAction({ ...a, switchAt: 0 });
+        }, a.switchAt - audio.now());
+        return;
+      }
       if (recording) {
         toast("Finish recording before changing timing.", true);
         return;
@@ -425,7 +586,6 @@ function applyAction(a) {
       session.beats = a.beats;
       session.bars = a.bars;
       session.pattern = resizePattern(session.pattern, a.beats);
-      for (const entry of audio.active.values()) entry.start = 0;
       if (was) audio.start(a.epoch || audio.now() + 250);
       renderTiming();
       renderSequencer();
@@ -462,9 +622,20 @@ function applyAction(a) {
         localShots.delete(key);
         break;
       }
-      audio.play({ voice: a.voice, note: a.note, duration: 0.45, velocity: 0.65 }, Math.max(audio.ctx.currentTime + 3e-3, audio.ctx.currentTime + (a.at - audio.now()) / 1e3));
+      audio.play({ voice: a.voice, note: a.note, sound: a.sound, tone: a.tone, duration: a.duration ?? 0.45, velocity: a.velocity ?? 0.65 }, Math.max(audio.ctx.currentTime + 3e-3, audio.ctx.currentTime + (a.at - audio.now()) / 1e3));
       break;
     }
+    case "sound":
+      session.rack.sounds[a.voice] = a.id;
+      rack.renderControls();
+      rack.renderDrums();
+      break;
+    case "kit":
+      session.rack.kit = a.id;
+      for (const v of ["kick", "snare", "hat", "openhat", "clap", "tom", "rim"]) session.rack.sounds[v] = a.id;
+      rack.renderControls();
+      rack.renderDrums();
+      break;
     case "step":
       session.pattern[a.voice][a.index] = a.on;
       renderSequencer();
@@ -474,45 +645,52 @@ function applyAction(a) {
       session.swing = a.swing;
       renderTiming();
       break;
+    case "padlevel":
+      session.pads[a.id].volume = a.volume;
+      audio.setPadVolume(a.id, a.volume);
+      renderQuickPad();
+      break;
+    case "samplestep": {
+      const p = session.pads[a.id];
+      p.steps = Array.from({ length: session.beats * 4 }, (_, i) => p.steps?.[i] || false);
+      p.steps[a.index] = a.on;
+      p.sequenceEnabled = true;
+      renderSampleSequencer();
+      break;
+    }
+    case "sampleseq":
+      session.pads[a.id].sequenceEnabled = a.on;
+      session.pads[a.id].steps ??= Array.from({ length: session.beats * 4 }, (_, i) => i === 0);
+      renderSampleSequencer();
+      break;
     case "setpad":
       audio.cancelPad(a.pad.id);
       audio.active.delete(a.pad.id);
       audio.pending.delete(a.pad.id);
       session.pads[a.pad.id] = structuredClone(a.pad);
       audio.setPadVolume(a.pad.id, a.pad.volume);
+      audio.setPadEffects(a.pad.id);
+      renderSampleSequencer();
       renderPads();
       break;
   }
   changed();
 }
-async function playInstrument(note, voice = instrument) {
-  await ready();
-  audio.play({ voice, note, duration: voice === "bass" ? 0.45 : 0.65, velocity: 0.7 });
-  if (recording?.kind === "notes" && audio.now() >= recording.start && audio.now() < recording.end) {
-    const b = (audio.now() - recording.start) / 1e3 / beatDuration(session.bpm);
-    recording.events.push({ beat: quantizeBeat(b) % (session.beats * session.bars), voice, note, duration: voice === "bass" ? 0.6 : 0.8, velocity: 0.7 });
+function performNote(event, time = audio.ctx.currentTime + 3e-3, alreadyPlayed = false) {
+  const spb = beatDuration(session.bpm), duration = alreadyPlayed ? event.duration * spb : event.duration;
+  const e = { ...event, duration };
+  if (!alreadyPlayed) audio.play(e, time);
+  const at = audio.now() + (time - audio.ctx.currentTime) * 1e3;
+  if (recording?.kind === "notes") {
+    const beat = alreadyPlayed ? event.beat - recording.startBeat : (at - recording.start) / 1e3 / spb;
+    if (beat >= 0 && beat < session.beats * session.bars) recording.events.push({ ...e, beat: (alreadyPlayed ? Math.round(beat * 1e6) / 1e6 : quantizeBeat(beat)) % (session.beats * session.bars), duration: duration / spb });
   }
   if (jam.role) {
-    const at = audio.now() + session.jamBuffer;
-    localShots.add(at + ":" + note + ":" + voice);
-    sendAction({ type: "note", voice, note, at });
+    const target = at + session.jamBuffer;
+    localShots.add(target + ":" + e.note + ":" + e.voice);
+    sendAction({ type: "note", ...e, at: target });
   }
 }
-$$("[data-instrument]").forEach((b) => b.onclick = () => {
-  instrument = b.dataset.instrument;
-  $$("[data-instrument]").forEach((e) => e.classList.toggle("active", e === b));
-  $("#keyboard").hidden = instrument === "drums";
-  $("#drum-kit").hidden = instrument !== "drums";
-});
-bind("#oct-down", "click", () => {
-  octave = clamp(octave - 1, 1, 7);
-  renderKeyboard();
-});
-bind("#oct-up", "click", () => {
-  octave = clamp(octave + 1, 1, 7);
-  renderKeyboard();
-});
-bind("#scale", "change", renderKeyboard);
 bind("#loop-mode", "click", () => {
   mode = "loop";
   $("#loop-mode").classList.add("active");
@@ -545,20 +723,30 @@ bind("#stop-loops", "click", () => {
   if (jam.role === "follower") throw new Error("The leader controls all loops. Tap a pad to stop that layer.");
   sendAction({ type: "stoploops" });
 });
-function changeTiming() {
+async function changeTiming() {
   if (recording) throw new Error("Finish recording before changing timing.");
-  sendAction({ type: "timing", bpm: clamp($("#bpm").value, 40, 240), beats: Number($("#beats").value), bars: Number($("#bars").value), epoch: audio.now() + 300 });
+  if (tempoPreparing) throw new Error("Preparing the previous tempo change.");
+  const bpm = clamp($("#bpm").value, 40, 240), beats = Number($("#beats").value), bars = Number($("#bars").value);
+  tempoPreparing = true;
+  try {
+    await ready();
+    await audio.prepareTempo(bpm, beats);
+    const switchAt = audio.now() + 220, phase = audio.running ? Math.max(0, audio.position() + 0.22 / beatDuration(session.bpm)) : 0;
+    sendAction({ type: "timing", bpm, beats, bars, switchAt, epoch: switchAt - phase * beatDuration(bpm) * 1e3 });
+  } finally {
+    tempoPreparing = false;
+  }
 }
 for (const id of ["#bpm", "#beats", "#bars"]) bind(id, "change", changeTiming);
 let taps = [];
-bind("#tap-btn", "click", () => {
+bind("#tap-btn", "click", async () => {
   const now = performance.now();
   if (taps.length && now - taps.at(-1) > 2500) taps = [];
   taps.push(now);
   taps = taps.slice(-5);
   if (taps.length > 1) {
     $("#bpm").value = clamp(Math.round(6e4 / ((now - taps[0]) / (taps.length - 1))), 40, 240);
-    changeTiming();
+    await changeTiming();
   }
 });
 bind("#metro-btn", "click", async () => {
@@ -588,6 +776,11 @@ bind("#seq-enabled", "change", async () => {
   if (session.seqEnabled && !audio.running && jam.role !== "follower") sendAction({ type: "start", epoch: audio.now() + 250 });
 });
 bind("#swing", "input", () => sendAction({ type: "pattern", enabled: session.seqEnabled, swing: Number($("#swing").value) }));
+bind("#seq-erase", "click", () => {
+  seqErase = !seqErase;
+  $("#seq-erase").setAttribute("aria-pressed", String(seqErase));
+  $("#seq-erase").textContent = seqErase ? "Erase: on" : "Erase: off";
+});
 bind("#seq-clear", "click", () => {
   for (const [voice, steps] of Object.entries(session.pattern)) steps.forEach((on, index) => {
     if (on) sendAction({ type: "step", voice, index, on: false });
@@ -600,14 +793,14 @@ bind("#drum-preset", "change", () => {
 bind("#seq-to-pad", "click", () => {
   const id = emptyPad(), events = [];
   for (const [voice, steps] of Object.entries(session.pattern)) steps.forEach((on, i) => {
-    if (on) events.push({ voice, beat: i / 4, note: 60, duration: 0.15, velocity: 0.65 });
+    if (on) events.push({ voice, sound: session.rack.sounds[voice], beat: i / 4, note: 60, duration: 0.15, velocity: 0.65 });
   });
   if (!events.length) throw new Error("Add some steps before saving a pattern.");
   sendAction({ type: "setpad", pad: { ...session.pads[id], kind: "loop", name: "My drum pattern", events, bars: 1 } });
   toast("Pattern saved to pad " + (id + 1));
 });
 bind("#pad-done", "click", () => {
-  const p = { ...session.pads[selected], name: $("#pad-name").value.trim() || session.pads[selected].name, volume: Number($("#pad-level").value) / 100, bars: Number($("#pad-bars").value) };
+  const p = { ...session.pads[selected], ...session.pads[selected].audioId ? readSampleEditor() : {}, name: $("#pad-name").value.trim() || session.pads[selected].name, volume: Number($("#pad-level").value) / 100, bars: Number($("#pad-bars").value) };
   sendAction({ type: "setpad", pad: p });
   $("#pad-dialog").close();
 });
@@ -625,15 +818,18 @@ bind("#pad-import", "click", () => {
   $("#audio-file").click();
   $("#pad-dialog").close();
 });
-async function addSample(name, blob, id = crypto.randomUUID()) {
+async function addSample(name, blob, id = crypto.randomUUID(), knownBuffer = null) {
   if (blob.size > 25 * 1024 * 1024) throw new Error("Use a sample under 25 MB to keep the studio snappy.");
-  const buffer = await audio.decode(id, await blob.arrayBuffer());
+  const buffer = knownBuffer || await audio.decode(id, await blob.arrayBuffer());
+  if (knownBuffer) audio.buffers.set(id, knownBuffer);
   if (buffer.duration > 600) {
     audio.buffers.delete(id);
     throw new Error("Use an audio clip under 10 minutes.");
   }
-  const sample = { id, name: name.slice(0, 80), blob, duration: buffer.duration };
-  await saveSample(sample);
+  const analysis = knownBuffer ? { bpm: session.bpm, bpmConfidence: 1, key: null, keyConfidence: 0, candidates: [], source: "recording" } : await analyzeBuffer(buffer);
+  const sample = { id, name: name.slice(0, 80), blob, duration: buffer.duration, analysis };
+  if (knownBuffer) saveSample(sample).catch(() => toast("Could not save this take. Export a backup.", true));
+  else await saveSample(sample);
   for (const p of session.pads) if (p.audioId === id) audio.resumeAudioPad(p.id);
   samples = samples.filter((s) => s.id !== id);
   samples.push(sample);
@@ -641,10 +837,12 @@ async function addSample(name, blob, id = crypto.randomUUID()) {
   return sample;
 }
 async function assignSample(s, id) {
-  const length = s.duration / (beatDuration(session.bpm) * session.beats);
-  const bars = [1, 2, 4, 8].reduce((a, b) => Math.abs(b - length) < Math.abs(a - length) ? b : a);
+  const sourceBpm = s.analysis?.bpm || session.bpm;
+  const bars = clamp(Math.round(s.duration / (60 / sourceBpm * session.beats)), 1, 512);
   if (jam.role) await shareSample(s);
-  sendAction({ type: "setpad", pad: { ...session.pads[id], name: s.name.replace(/\.[^.]+$/, ""), kind: "audio", audioId: s.id, events: [], bars, volume: 0.75 } });
+  sendAction({ type: "setpad", pad: { ...session.pads[id], name: s.name.replace(/\.[^.]+$/, ""), trackAnalysis: s.analysis, kind: "audio", audioId: s.id, events: [], bars, volume: 0.75 } });
+  selected = id;
+  renderQuickPad();
 }
 async function shareSample(s) {
   if (jam.role === "follower") await jam.sendAudio(s, jam.hostConnection());
@@ -673,28 +871,30 @@ bind("#audio-file", "change", async () => {
   }
 });
 async function beginRecording(kind, target = null) {
+  if (tempoPreparing || tempoTimer) throw new Error("Wait for the tempo change before recording.");
   await ready();
   if (recording) {
     await finishRecording();
     return;
   }
-  const id = target ?? emptyPad();
+  const id = target ?? (session.pads[selected]?.kind === "empty" ? selected : emptyPad());
   if (!audio.running) {
     if (jam.role === "follower") throw new Error("Ask the leader to start the transport first.");
     sendAction({ type: "start", epoch: audio.now() + 250 });
   }
   let mic = null;
   if (kind === "mic") mic = await audio.beginMic(0, 0);
-  const startBeat = nextBoundary(audio.position(), session.beats) + session.beats;
+  const countIn = $("#record-countin").value === "bar" ? session.beats : Number($("#record-countin").value);
+  const { startBeat } = planRecording(audio.position(), session.bpm, session.beats, session.bars, countIn);
   const start = audio.epoch + startBeat * beatDuration(session.bpm) * 1e3;
   const end = start + session.beats * session.bars * beatDuration(session.bpm) * 1e3;
-  recording = { kind, id, startBeat, start, end, events: [], mic, countIn: true, bars: session.bars, beats: session.beats, startAudio: audio.ctx.currentTime + (start - audio.now()) / 1e3 };
+  recording = { kind, id, startBeat, start, end, events: [], mic, countIn: countIn > 0, bars: session.bars, beats: session.beats, startAudio: audio.ctx.currentTime + (start - audio.now()) / 1e3 };
   audio.capture = recording;
   $("#capture-btn").classList.add("recording");
   $("#mic-btn").classList.toggle("recording", kind === "mic");
   $("#capture-btn").innerHTML = '<span class="record-dot"></span> Cancel take';
   $("#mic-btn").innerHTML = '<span class="record-dot"></span> Cancel';
-  toast("Count in… your loop starts on the next full bar.");
+  toast(countIn ? "Count in… then your loop starts on the beat." : "Armed. Recording begins on the next beat.");
 }
 async function cancelRecording() {
   if (!recording) return;
@@ -711,7 +911,7 @@ function resetRecordingUI() {
   $("#capture-btn").innerHTML = '<span class="record-dot"></span> Capture loop';
   $("#mic-btn").innerHTML = '<span class="record-dot"></span> Record';
   $("#capture-title").textContent = "Catch your next idea";
-  $("#capture-hint").textContent = "One bar count-in, then record your loop.";
+  $("#capture-hint").textContent = "Starts on the next beat. The take loops as soon as it is ready.";
   $("#mic-status").textContent = "Record a sound, or drop in a track.";
 }
 async function finishRecording() {
@@ -725,16 +925,20 @@ async function finishRecording() {
     if (r.mic) {
       await r.mic.stop();
       const b = audio.micBuffer(r.mic, r.startAudio, r.startAudio + (r.end - r.start) / 1e3), wav = audio.bufferWav(b);
-      const s = await addSample("Mic loop " + (/* @__PURE__ */ new Date()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), new Blob([wav], { type: "audio/wav" }));
+      const s = await addSample("Mic loop " + (/* @__PURE__ */ new Date()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), new Blob([wav], { type: "audio/wav" }), crypto.randomUUID(), b);
       pad.audioId = s.id;
-      if (jam.role) await shareSample(s);
+      pad.alignment = analyzeRecording(b.getChannelData(0), b.sampleRate, session.bpm);
+      pad.alignment.enabled = $("#smart-record").checked;
+      if (jam.role) shareSample(s).catch((e) => toast(e.message, true));
     } else if (!r.events.length) {
       toast("No notes in that take. Give it another go.");
       return;
     }
     sendAction({ type: "setpad", pad });
-    if (audio.running) sendAction({ type: "pad", id: r.id, beat: nextBoundary(audio.position(), session.beats), on: true });
-    toast("Loop captured. Layer something else.");
+    selected = r.id;
+    renderQuickPad();
+    if (audio.running) sendAction({ type: "pad", id: r.id, beat: r.startBeat + r.beats * r.bars, catchUp: true, on: true });
+    toast(pad.alignment?.enabled && pad.alignment.shift ? `Loop captured · timing corrected by ${Math.abs(pad.alignment.shift)} ms.` : "Loop captured. Already in time.");
   } finally {
     writing = false;
     resetRecordingUI();
@@ -748,6 +952,7 @@ bind("#pad-mic", "click", () => {
 });
 audio.addEventListener("captureend", attempt(finishRecording));
 audio.addEventListener("pads", renderPadStates);
+audio.addEventListener("audioerror", ({ detail }) => toast(detail, true));
 audio.addEventListener("transport", () => {
   const b = $("#play-btn");
   b.classList.toggle("playing", audio.running);
@@ -852,16 +1057,13 @@ document.addEventListener("keydown", attempt(async (e) => {
   if (e.repeat) return;
   const key = e.key.toLowerCase();
   if (view === "instruments") {
-    const keys = { "a": 0, "w": 1, "s": 2, "e": 3, "d": 4, "f": 5, "t": 6, "g": 7, "y": 8, "h": 9, "u": 10, "j": 11, "k": 12 };
-    if (key in keys) {
-      if (instrument === "drums") await playInstrument(60, drums[keys[key] % drums.length]);
-      else await playInstrument(octave * 12 + 12 + keys[key]);
-    }
+    await rack.keyDown(e);
     return;
   }
   const id = padKeys.indexOf(key);
   if (id >= 0 && session.pads[id].kind !== "empty") await triggerPad(id);
 }));
+document.addEventListener("keyup", (e) => rack.keyUp(e));
 function tick() {
   if (audio.running) {
     const p = Math.max(0, audio.position());
@@ -908,6 +1110,7 @@ jam.addEventListener("command", ({ detail }) => {
 jam.addEventListener("accepted", ({ detail }) => {
   incomingCommands = incomingCommands.then(async () => {
     if (!audio.ctx) await ready();
+    if (detail.action?.type === "timing") await audio.prepareTempo(detail.action.bpm, detail.action.beats);
     const pending = audioImports.get(detail.action?.pad?.audioId);
     if (pending) await pending;
     if (["timing", "stop", "pack"].includes(detail.action?.type)) await cancelRecording();

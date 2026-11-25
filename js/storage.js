@@ -38,7 +38,7 @@ async function exportProject(session, samples) {
     const bytes = new Uint8Array(await s.blob.arrayBuffer());
     let binary = "";
     for (let i = 0; i < bytes.length; i += 16384) binary += String.fromCharCode(...bytes.subarray(i, i + 16384));
-    audio.push({ id: s.id, name: s.name, duration: s.duration, type: s.blob.type, data: btoa(binary) });
+    audio.push({ id: s.id, name: s.name, duration: s.duration, analysis: s.analysis, type: s.blob.type, data: btoa(binary) });
   }
   download(JSON.stringify({ session, audio }), (session.name || "Mobipad") + ".mobipad.json");
 }

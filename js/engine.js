@@ -1,5 +1,9 @@
 import { beatDuration, positionAt, nextBoundary, wavEncode } from "./timing.js";
 import { drums } from "./presets.js";
+import { getSound, defaultRack } from "./sounds.js";
+import { pluckedString } from "./string-model.js";
+import { Arpeggiator } from "./arpeggiator.js";
+import { requestDSP } from "./dsp-client.js";
 class AudioEngine extends EventTarget {
   constructor(session) {
     super();
@@ -18,6 +22,12 @@ class AudioEngine extends EventTarget {
     this.timer = null;
     this.noise = null;
     this.readyPromise = null;
+    this.arp = new Arpeggiator();
+    this.stringBuffers = /* @__PURE__ */ new Map();
+    this.processedBuffers = /* @__PURE__ */ new Map();
+    this.padEffects = /* @__PURE__ */ new Map();
+    this.stretchedBuffers = /* @__PURE__ */ new Map();
+    this.stretchTasks = /* @__PURE__ */ new Map();
   }
   async init() {
     if (!this.ctx) {
@@ -57,12 +67,15 @@ class AudioEngine extends EventTarget {
     this.epoch = epoch;
     this.running = true;
     this.nextStep = Math.max(0, Math.ceil(this.position() * 4));
+    this.arp.nextBeat = null;
+    this.arp.index = 0;
     this.timer = setInterval(() => this.schedule(), 20);
     this.schedule();
     for (const id of this.active.keys()) this.resumeAudioPad(id);
     this.dispatchEvent(new Event("transport"));
   }
   stop(clear = true) {
+    this.previewCleanup?.();
     clearInterval(this.timer);
     this.running = false;
     for (const n of this.nodes) {
@@ -73,7 +86,10 @@ class AudioEngine extends EventTarget {
     }
     this.nodes.clear();
     this.pending.clear();
-    if (clear) this.active.clear();
+    if (clear) {
+      this.active.clear();
+      this.arp.clear();
+    }
     this.dispatchEvent(new Event("transport"));
   }
   cancelPad(id, when = this.ctx?.currentTime) {
@@ -92,6 +108,14 @@ class AudioEngine extends EventTarget {
       gain.gain.value = this.session.pads[id].volume;
       gain.connect(this.master);
       this.padBuses.set(id, gain);
+      const delay = this.ctx.createDelay(1.1), wet = this.ctx.createGain(), feedback = this.ctx.createGain();
+      gain.connect(delay);
+      delay.connect(wet);
+      wet.connect(this.master);
+      delay.connect(feedback);
+      feedback.connect(delay);
+      this.padEffects.set(id, { delay, wet, feedback });
+      this.setPadEffects(id);
     }
     return this.padBuses.get(id);
   }
@@ -99,13 +123,73 @@ class AudioEngine extends EventTarget {
     const bus = this.padBuses?.get(id);
     if (bus) bus.gain.setTargetAtTime(value, this.ctx.currentTime, 0.01);
   }
+  setPadEffects(id) {
+    const fx = this.padEffects.get(id), p = this.session.pads[id];
+    if (!fx || !p) return;
+    fx.delay.delayTime.setTargetAtTime(p.echoTime || 0.25, this.ctx.currentTime, 0.02);
+    fx.wet.gain.setTargetAtTime(p.echo || 0, this.ctx.currentTime, 0.015);
+    fx.feedback.gain.setTargetAtTime((p.echo || 0) * 0.55, this.ctx.currentTime, 0.015);
+  }
+  sampleBuffer(id) {
+    const p = this.session.pads[id], original = this.buffers.get(p.audioId);
+    if (!original) return null;
+    const start = Math.min(original.duration - 1e-3, p.trimStart || 0), end = Math.min(original.duration, p.trimEnd || original.duration), a = p.alignment;
+    const shift = (a?.enabled ? a.shift : 0) - (a?.manual || 0);
+    if (start === 0 && end === original.duration && !shift) return original;
+    const key = [p.audioId, start, end, shift].join(":");
+    if (this.processedBuffers.has(key)) return this.processedBuffers.get(key);
+    const from = Math.round(start * original.sampleRate), length = Math.max(1, Math.round((end - start) * original.sampleRate)), buffer = this.ctx.createBuffer(original.numberOfChannels, length, original.sampleRate), rotation = Math.round(shift / 1e3 * original.sampleRate);
+    for (let ch = 0; ch < original.numberOfChannels; ch++) {
+      const input = original.getChannelData(ch), output = buffer.getChannelData(ch);
+      for (let i = 0; i < length; i++) {
+        const offset = ((i + rotation) % length + length) % length;
+        output[i] = input[from + offset] || 0;
+      }
+    }
+    this.processedBuffers.set(key, buffer);
+    if (this.processedBuffers.size > 24) this.processedBuffers.delete(this.processedBuffers.keys().next().value);
+    return buffer;
+  }
+  stretchKey(id, bpm = this.session.bpm, beats = this.session.beats) {
+    const p = this.session.pads[id], buffer = this.sampleBuffer(id);
+    if (!buffer) return null;
+    return [p.audioId, p.trimStart || 0, p.trimEnd || 0, p.alignment?.enabled ? p.alignment.shift : 0, p.alignment?.manual || 0, bpm, beats, p.bars].join(":");
+  }
+  async preparePad(id, bpm = this.session.bpm, beats = this.session.beats) {
+    const original = this.sampleBuffer(id);
+    if (!original) return null;
+    const p = this.session.pads[id], targetLength = Math.round(p.bars * beats * 60 / bpm * original.sampleRate);
+    if (targetLength > original.sampleRate * 600) throw new Error("Loop exceeds ten minutes at this tempo. Choose fewer bars.");
+    if (Math.abs(targetLength - original.length) < 3) return original;
+    const key = this.stretchKey(id, bpm, beats);
+    if (this.stretchedBuffers.has(key)) return this.stretchedBuffers.get(key);
+    if (this.stretchTasks.has(key)) return this.stretchTasks.get(key);
+    const task = (async () => {
+      const channels = Array.from({ length: Math.min(2, original.numberOfChannels) }, (_, i) => original.getChannelData(i).slice());
+      const rendered = await requestDSP("stretch", { channels, sampleRate: original.sampleRate, targetLength });
+      const buffer = this.ctx.createBuffer(rendered.length, targetLength, original.sampleRate);
+      rendered.forEach((c, i) => buffer.copyToChannel(c, i));
+      this.stretchedBuffers.set(key, buffer);
+      if (this.stretchedBuffers.size > 16) this.stretchedBuffers.delete(this.stretchedBuffers.keys().next().value);
+      return buffer;
+    })();
+    this.stretchTasks.set(key, task);
+    try {
+      return await task;
+    } finally {
+      this.stretchTasks.delete(key);
+    }
+  }
+  async prepareTempo(bpm, beats = this.session.beats) {
+    for (const p of this.session.pads) if (p.audioId && this.buffers.has(p.audioId) && (this.active.has(p.id) || this.pending.get(p.id)?.on)) await this.preparePad(p.id, bpm, beats);
+  }
   resumeAudioPad(id) {
     const p = this.session.pads[id], active = this.active.get(id);
     if (!this.running || !active || !p?.audioId || !this.buffers.has(p.audioId) || [...this.nodes].some((n) => n.padId === id)) return;
-    const pos = positionAt(this.now() + 30 - this.session.outputOffset, this.epoch, this.session.bpm);
+    const pos = positionAt(this.now() + 30 - this.session.outputOffset - (p.preDelay || 0), this.epoch, this.session.bpm);
     const relative = pos - active.start;
     if (relative < 0) this.launchAudio(id, Math.max(this.ctx.currentTime + 3e-3, this.timeForBeat(active.start)), active.start);
-    else this.launchAudio(id, this.ctx.currentTime + 0.03, pos, relative % (p.bars * this.session.beats));
+    else this.launchAudio(id, this.ctx.currentTime + 0.03 - (p.preDelay || 0) / 1e3, pos, relative % (p.bars * this.session.beats));
   }
   queuePad(id, grid = "bar", atBeat = null, desired = null) {
     const on = desired ?? !(this.pending.get(id)?.on ?? this.active.has(id));
@@ -128,13 +212,20 @@ class AudioEngine extends EventTarget {
     if (!this.running || this.ctx.state !== "running") return;
     const now = this.ctx.currentTime;
     const pos = this.position();
+    const arpConfig = this.session.rack?.arp;
+    if (arpConfig) this.arp.schedule(pos, pos + 0.09 / beatDuration(this.session.bpm), arpConfig, (e) => {
+      const time = Math.max(now + 3e-3, this.timeForBeat(e.beat));
+      this.play({ ...e, duration: e.duration * beatDuration(this.session.bpm) }, time);
+      this.dispatchEvent(new CustomEvent("arpnote", { detail: { event: e, time } }));
+    });
     if (this.nextStep < pos * 4 - 2) this.nextStep = Math.max(0, Math.ceil(pos * 4));
     for (const [id, p] of this.pending) {
       const t = this.timeForBeat(p.beat);
       if (t < now + 0.09) {
         if (p.on) {
           this.active.set(id, { start: p.beat });
-          this.launchAudio(id, Math.max(now + 2e-3, t), p.beat);
+          if (t < now - 5e-3) this.resumeAudioPad(id);
+          else this.launchAudio(id, Math.max(now + 2e-3, t), p.beat);
         } else {
           this.active.delete(id);
           this.cancelPad(id, Math.max(now + 1e-3, t));
@@ -154,7 +245,7 @@ class AudioEngine extends EventTarget {
       }
       this.nextStep++;
     }
-    if (this.capture && this.now() >= this.capture.end + 100 && !this.capture.finishing) {
+    if (this.capture && this.now() >= this.capture.end + (this.capture.mic ? Math.max(25, this.session.inputLatency + 10) : 10) && !this.capture.finishing) {
       this.capture.finishing = true;
       this.dispatchEvent(new CustomEvent("captureend", { detail: this.capture }));
     }
@@ -168,6 +259,10 @@ class AudioEngine extends EventTarget {
     if (this.session.seqEnabled) {
       const step = Math.round(beat * 4) % (this.session.beats * 4);
       for (const [voice, steps] of Object.entries(this.session.pattern)) if (steps[step]) this.play({ voice, note: 60, duration: 0.1, velocity: voice === "hat" ? 0.3 : 0.7 }, time);
+      for (const p of this.session.pads) if (p.audioId && p.sequenceEnabled && p.steps?.[step] && !this.muted.has(p.id)) {
+        this.cancelPad(p.id, time);
+        this.oneShot(p.id, time);
+      }
     }
     for (const [id, a] of this.active) {
       const p = this.session.pads[id];
@@ -180,17 +275,28 @@ class AudioEngine extends EventTarget {
         continue;
       }
       const local = (relative % length + length) % length;
-      for (const e of p.events) if (Math.abs(e.beat - local) < 0.01) this.play({ ...e, duration: e.duration * spb }, time, p.volume, id);
+      for (const e of p.events) {
+        const delta = e.beat - local;
+        if (delta >= -1e-3 && delta < 0.25 - 1e-3) this.play({ ...e, duration: e.duration * spb }, time + Math.max(0, delta) * spb, p.volume, id);
+      }
     }
   }
   launchAudio(id, time, startBeat, phaseBeats = 0) {
-    const p = this.session.pads[id], buffer = this.buffers.get(p.audioId);
+    const p = this.session.pads[id], original = this.sampleBuffer(id);
+    if (!original) return;
+    const targetLength = Math.round(p.bars * this.session.beats * beatDuration(this.session.bpm) * original.sampleRate), key = this.stretchKey(id);
+    const buffer = Math.abs(targetLength - original.length) < 3 ? original : this.stretchedBuffers.get(key);
+    if (!buffer) {
+      this.preparePad(id).then(() => this.resumeAudioPad(id)).catch((error) => this.dispatchEvent(new CustomEvent("audioerror", { detail: error.message })));
+      return;
+    }
     if (!buffer || this.muted.has(id)) return;
+    time = Math.max(this.ctx.currentTime + 1e-3, time + (p.preDelay || 0) / 1e3);
     const total = p.bars * this.session.beats * beatDuration(this.session.bpm), length = total - phaseBeats * beatDuration(this.session.bpm);
     if (length < 0.012) return;
     const source = this.ctx.createBufferSource();
     source.buffer = buffer;
-    source.playbackRate.value = buffer.duration / total;
+    source.playbackRate.value = 1;
     const gain = this.ctx.createGain();
     gain.gain.setValueAtTime(0, time);
     gain.gain.linearRampToValueAtTime(1, time + 5e-3);
@@ -204,9 +310,9 @@ class AudioEngine extends EventTarget {
   }
   oneShot(id, when = null) {
     const p = this.session.pads[id];
-    const t = when ?? this.ctx.currentTime + 3e-3;
+    const t = (when ?? this.ctx.currentTime + 3e-3) + (p.preDelay || 0) / 1e3;
     if (p.audioId) {
-      const buffer = this.buffers.get(p.audioId);
+      const buffer = this.sampleBuffer(id);
       if (!buffer) return;
       const n = this.ctx.createBufferSource(), g = this.ctx.createGain();
       n.buffer = buffer;
@@ -216,6 +322,48 @@ class AudioEngine extends EventTarget {
       this.track(n, g, id);
       n.start(t);
     } else for (const e of p.events) this.play({ ...e, duration: e.duration * beatDuration(this.session.bpm) }, t + e.beat * beatDuration(this.session.bpm), p.volume, id);
+  }
+  previewSample(id, settings) {
+    this.previewCleanup?.();
+    const original = this.session.pads[id];
+    let buffer;
+    this.session.pads[id] = { ...original, ...settings };
+    try {
+      buffer = this.sampleBuffer(id);
+    } finally {
+      this.session.pads[id] = original;
+    }
+    if (!buffer) return;
+    const c = this.ctx, source = c.createBufferSource(), gain = c.createGain(), nodes = [gain];
+    source.buffer = buffer;
+    gain.gain.value = original.volume;
+    source.connect(gain);
+    gain.connect(this.master);
+    if (settings.echo) {
+      const delay = c.createDelay(1.1), wet = c.createGain(), feedback = c.createGain();
+      delay.delayTime.value = settings.echoTime || 0.25;
+      wet.gain.value = settings.echo;
+      feedback.gain.value = settings.echo * 0.55;
+      gain.connect(delay);
+      delay.connect(wet);
+      wet.connect(this.master);
+      delay.connect(feedback);
+      feedback.connect(delay);
+      nodes.push(delay, wet, feedback);
+    }
+    const clean = () => {
+      try {
+        source.stop();
+      } catch {
+      }
+      source.disconnect();
+      nodes.forEach((n) => n.disconnect());
+      if (this.previewCleanup === clean) this.previewCleanup = null;
+    };
+    this.previewCleanup = clean;
+    this.track(source, null, "preview");
+    source.addEventListener("ended", () => setTimeout(clean, settings.echo ? Math.min(4e3, (settings.echoTime || 0.25) * 8e3) : 0));
+    source.start(c.currentTime + 5e-3 + (settings.preDelay || 0) / 1e3);
   }
   track(source, gain, id) {
     source.padId = id;
@@ -229,6 +377,9 @@ class AudioEngine extends EventTarget {
   play(e, time = this.ctx.currentTime + 3e-3, level = 1, id = null) {
     const c = this.ctx, t = Math.max(time, c.currentTime), v = Math.max(1e-3, (e.velocity ?? 0.7) * (id === null ? level : 1)), voice = e.voice;
     const freq = 440 * 2 ** ((e.note - 69) / 12);
+    const rack = this.session.rack || defaultRack();
+    const sound = getSound(voice, e.sound || rack.sounds[voice]);
+    const tone = { ...rack.tone, ...e.tone };
     const osc = (type, f2, decay, amp = v, slide = null) => {
       const n2 = c.createOscillator(), g2 = c.createGain();
       n2.type = type;
@@ -260,33 +411,36 @@ class AudioEngine extends EventTarget {
       n2.addEventListener("ended", () => f2.disconnect());
     };
     if (voice === "kick") {
-      osc("sine", 145, 0.35, v * 1.5, 42);
+      osc("sine", sound.start, sound.decay, v * 1.5, sound.end);
+      if (sound.click) noise(0.018, 2400, "highpass", v * sound.click);
+      if (sound.drive) osc("triangle", sound.start * 0.7, 0.15, v * 0.45, sound.end);
       return;
     }
     if (voice === "snare") {
-      noise(0.16, 1400, "highpass", v);
-      osc("triangle", 185, 0.12, v * 0.4);
+      noise(sound.decay, 1400, "highpass", v * sound.noise);
+      osc("triangle", sound.freq, 0.12, v * 0.4);
       return;
     }
     if (voice === "hat" || voice === "openhat") {
-      noise(voice === "hat" ? 0.055 : 0.3, 7200, "highpass", v * 0.7);
+      noise(sound.decay, sound.cutoff, "highpass", v * 0.7);
+      if ((e.sound || rack.sounds[voice]) === "909") [4100, 5710, 7990].forEach((f) => osc("square", f, sound.decay, v * 0.07));
       return;
     }
     if (voice === "clap") {
-      noise(0.12, 1700, "bandpass", v * 1.5);
+      noise(sound.decay, sound.cutoff, "bandpass", v * 1.5);
       return;
     }
     if (voice === "tom") {
-      osc("sine", 210, 0.3, v, 75);
+      osc("sine", sound.freq, sound.decay, v, sound.freq * 0.42);
       return;
     }
     if (voice === "rim") {
-      osc("square", 840, 0.025, v * 0.6);
-      osc("sine", 430, 0.04, v * 0.5);
+      osc("square", sound.freq, 0.025, v * 0.6);
+      osc("sine", sound.freq * 0.51, 0.04, v * 0.5);
       return;
     }
     if (voice === "triangle") {
-      [1570, 2213, 3347, 5127].forEach((f2, i) => osc("sine", f2, 1.5 - i * 0.2, v / (i + 2)));
+      [1570, 2213, 3347, 5127].forEach((f2, i) => osc("sine", f2, sound.decay / (1 + i * 0.2), v / (i + 2)));
       return;
     }
     if (voice === "bell") {
@@ -294,35 +448,120 @@ class AudioEngine extends EventTarget {
       return;
     }
     if (voice === "piano") {
-      [1, 2, 3, 4].forEach((h, i) => osc("sine", freq * h, Math.max(0.1, e.duration) * (0.9 - i * 0.14) + 0.18, v / (1 + i * 3)));
+      if (sound.id === "electric") {
+        [1, 2.01, 3.98, 7].forEach((h, i) => osc("sine", freq * h, Math.max(0.15, e.duration) * sound.decay / (1 + i * 0.35), v / (1 + i * 4)));
+      } else [1, 2, 3, 4, 6].forEach((h, i) => osc("sine", freq * h, Math.max(0.1, e.duration) * sound.decay / (1 + i * 0.22) + 0.15, v / (1 + i * (4 - sound.brightness * 2))));
       osc("triangle", freq, 0.07, v * 0.12);
       return;
     }
-    if (voice === "bass") {
+    if (voice === "bass" && sound.id === "sub") {
       osc("triangle", freq, e.duration + 0.08, v * 0.9);
       osc("sine", freq / 2, e.duration + 0.05, v * 0.6);
       return;
     }
-    if (voice === "guitar") {
-      [1, 2, 3, 4, 5, 6].forEach((h, i) => osc("sine", freq * h, Math.max(0.12, e.duration) / (1 + i * 0.35) + 0.15, v / (1 + i * 2)));
+    if (voice === "guitar" || voice === "bass") {
+      this.playString(e, t, v, id, sound, tone);
       return;
     }
-    const n = c.createOscillator(), f = c.createBiquadFilter(), g = c.createGain();
-    n.type = "sawtooth";
-    n.frequency.value = freq;
-    f.type = "lowpass";
-    f.frequency.setValueAtTime(2600, t);
-    f.frequency.exponentialRampToValueAtTime(250, t + Math.max(0.1, e.duration));
-    g.gain.setValueAtTime(0, t);
-    g.gain.linearRampToValueAtTime(v * 0.18, t + 8e-3);
-    g.gain.exponentialRampToValueAtTime(1e-4, t + e.duration + 0.12);
-    n.connect(f);
-    f.connect(g);
-    g.connect(this.bus(id));
-    this.track(n, g, id);
-    n.start(t);
-    n.stop(t + e.duration + 0.15);
-    n.addEventListener("ended", () => f.disconnect());
+    this.playSynth(e, t, v, id, sound, tone);
+  }
+  playString(e, t, volume, id, sound, tone) {
+    const c = this.ctx, key = e.voice + ":" + sound.id + ":" + e.note;
+    let buffer = this.stringBuffers.get(key);
+    if (!buffer) {
+      const samples = pluckedString(e.note, c.sampleRate, sound, sound.id === "muted" ? 1.2 : 3);
+      buffer = c.createBuffer(1, samples.length, c.sampleRate);
+      buffer.copyToChannel(samples, 0);
+      this.stringBuffers.set(key, buffer);
+      if (this.stringBuffers.size > 48) this.stringBuffers.delete(this.stringBuffers.keys().next().value);
+    }
+    const source = c.createBufferSource(), filter = c.createBiquadFilter(), body = c.createBiquadFilter(), gain = c.createGain();
+    source.buffer = buffer;
+    filter.type = "lowpass";
+    filter.frequency.value = Math.min(c.sampleRate * 0.45, 600 + tone.brightness * sound.brightness * 10500);
+    filter.Q.value = 0.5;
+    body.type = "peaking";
+    body.frequency.value = sound.body;
+    body.Q.value = 1.1;
+    body.gain.value = 4;
+    const life = Math.min(buffer.duration, Math.max(0.12, e.duration * (0.5 + tone.decay * 1.7) + tone.release));
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(volume * 0.7, t + 3e-3);
+    gain.gain.exponentialRampToValueAtTime(1e-4, t + life);
+    source.connect(filter);
+    filter.connect(body);
+    let last = body;
+    const extras = [];
+    const drive = (sound.drive || 0) + tone.drive * 3;
+    if (drive > 0.05) {
+      const shaper = c.createWaveShaper(), curve = new Float32Array(1024);
+      for (let i = 0; i < curve.length; i++) {
+        const x = i * 2 / (curve.length - 1) - 1;
+        curve[i] = Math.tanh(x * (1 + drive * 5)) / Math.tanh(1 + drive * 5);
+      }
+      shaper.curve = curve;
+      shaper.oversample = "2x";
+      last.connect(shaper);
+      last = shaper;
+      extras.push(shaper);
+    }
+    last.connect(gain);
+    gain.connect(this.bus(id));
+    this.track(source, gain, id);
+    source.addEventListener("ended", () => {
+      filter.disconnect();
+      body.disconnect();
+      extras.forEach((n) => n.disconnect());
+    });
+    source.start(t);
+    source.stop(t + life);
+  }
+  playSynth(e, t, volume, id, sound, tone) {
+    const c = this.ctx, freq = 440 * 2 ** ((e.note - 69) / 12), filter = c.createBiquadFilter(), gain = c.createGain();
+    const attack = Math.max(sound.attack || 0, tone.attack), life = Math.max(attack + 0.05, e.duration) + tone.release;
+    filter.type = "lowpass";
+    filter.Q.value = sound.resonance || tone.resonance;
+    filter.frequency.setValueAtTime(Math.min(c.sampleRate * 0.45, tone.cutoff * (sound.cutoff / 3200)), t);
+    filter.frequency.exponentialRampToValueAtTime(Math.max(120, tone.cutoff * 0.12), t + life);
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(volume * 0.18, t + attack);
+    gain.gain.setValueAtTime(volume * 0.13, t + Math.max(attack, e.duration));
+    gain.gain.exponentialRampToValueAtTime(1e-4, t + life);
+    filter.connect(gain);
+    gain.connect(this.bus(id));
+    const nodes = [];
+    for (const offset of [-1, 1]) {
+      const n = c.createOscillator();
+      n.type = sound.wave;
+      n.frequency.value = freq;
+      n.detune.value = offset * (tone.detune + (sound.detune || 0)) * 0.5;
+      n.connect(filter);
+      nodes.push(n);
+      if (sound.fm) {
+        const mod = c.createOscillator(), depth = c.createGain();
+        mod.frequency.value = freq * sound.fm;
+        depth.gain.setValueAtTime(freq * 0.7, t);
+        depth.gain.exponentialRampToValueAtTime(1e-3, t + life);
+        mod.connect(depth);
+        depth.connect(n.frequency);
+        mod.start(t);
+        mod.stop(t + life);
+        n.addEventListener("ended", () => {
+          mod.disconnect();
+          depth.disconnect();
+        });
+      }
+      n.start(t);
+      n.stop(t + life + 0.01);
+      this.track(n, null, id);
+    }
+    let ended = 0;
+    for (const n of nodes) n.addEventListener("ended", () => {
+      if (++ended === nodes.length) {
+        filter.disconnect();
+        gain.disconnect();
+      }
+    });
   }
   click(time, accent = false) {
     const n = this.ctx.createOscillator(), g = this.ctx.createGain();
@@ -352,6 +591,7 @@ class AudioEngine extends EventTarget {
     await this.init();
     const b = await this.ctx.decodeAudioData(array.slice(0));
     this.buffers.set(id, b);
+    this.processedBuffers.clear();
     return b;
   }
   async openMic() {

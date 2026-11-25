@@ -2,7 +2,7 @@
 
 ## Automated checks
 
-`npm run check` verifies JavaScript syntax and runtime assets. All 22 tests pass, covering timing, presets, worklet capture, audio scheduling, peer packet handling and recording compensation. `node scripts/privacy-check.mjs` checks public files for configured or previous private author emails, local home paths, and GitHub token patterns without displaying those values.
+`npm run check` verifies JavaScript syntax and runtime assets. All 46 tests pass, covering timing, presets, worklet capture, audio scheduling, peer packet handling, recording compensation, circular grid alignment, arpeggios, project migration, click/erase behavior, key/BPM detection, stereo time stretching, pitch retention, and 44.1/48 kHz buffering. `node scripts/privacy-check.mjs` checks public files for configured or previous private author emails, local home paths, and GitHub token patterns without displaying those values.
 
 ## Browser checks completed
 
@@ -20,7 +20,40 @@ Tested in the desktop app's Chromium-based browser on November 25, 2026:
 - No browser error/warning entries were reported during those checks.
 - Responsive layout reached the mobile breakpoint without overlapping transport controls in the observed preview. Exact 390/360/320px checks remain below.
 
-The browser automation service subsequently timed out repeatedly. Final viewport, generated-audio and microphone checks could not be completed through it. Code fixes after these browser checks are covered by the command-line suite; they have not all been rechecked in the browser.
+The initial browser session later timed out. The expanded version was subsequently checked in a fresh browser session, as recorded below. Physical microphone/hardware latency still requires real-device testing.
+
+## Instruments and synthesis update
+
+- Guitar fretboard, standard tuning, preset selection and open-string strumming checked in the browser.
+- Latched synth arpeggio captured into a new pad and played as a loop.
+- All 57 sound/preset combinations rendered finite, non-silent output in an OfflineAudioContext.
+- Production AudioWorklet captured a generated 440 Hz signal, trimmed an exact 400 ms take and round-tripped it through WAV without opening the physical microphone.
+
+## Recording and pad editing update
+
+- Next-beat capture and signed onset-grid correction covered with PCM fixtures and timing tests.
+- Original sample rotation preserves exact loop duration and source data.
+- Sample waveform editor loads decoded audio after refresh; trim, predelay and quick volume were exercised in the browser.
+- Quick clear removes the selected sample pad and its sequencer lane while retaining the source in the library.
+
+## Sequencer editing update
+
+- Browser verified left click sets a hit and right click clears it.
+- Desktop context menu suppression and phone Erase mode covered by event tests.
+- Imported samples appear as editable step-trigger lanes with trim/delay controls.
+
+## BPM, key and pitch preservation update
+
+- Fixture tests detect 120 BPM with a 60 BPM alternative, identify C major, and leave silence or one unchanging pitch without an invented key.
+- WSOLA keeps the 440 Hz spectral fundamental when shortening/lengthening a clip; stereo separation and real-device sample rates are tested.
+- Browser detected 120 BPM in an imported sample and the Use this tempo flow changed the session from 110 to 120.
+- A generated C-major/120 BPM sample was automatically labeled C major and 120 BPM on import. Browser-worker time stretching retained the 440 Hz fundamental in the capture integration test.
+- Extreme stretches may produce audible artifacts. BPM/key ambiguity and hardware recording latency are not eliminated by these tests.
+
+## Mobile layout update
+
+- Embedded the production UI in 390, 360 and 320 CSS-pixel phone frames.
+- Guitar, strumming and arpeggiator controls were visually inspected. A narrow transport overflow was fixed; at the final 320/360 frame sizes, document scroll width equals its client width.
 
 ## Reproducible browser integration checks
 

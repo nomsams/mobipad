@@ -1,3 +1,5 @@
+import { validSampleSettings } from "./sample-analysis.js";
+import { defaultRack, normalizeRack, validSound, validTone } from "./sounds.js";
 const padKeys = ["1", "2", "3", "4", "q", "w", "e", "r", "a", "s", "d", "f", "z", "x", "c", "v"];
 const drums = ["kick", "snare", "hat", "openhat", "clap", "tom", "rim", "triangle"];
 const drumNames = { kick: "Kick", snare: "Snare", hat: "Hi-hat", openhat: "Open hat", clap: "Clap", tom: "Tom", rim: "Rim", triangle: "Triangle" };
@@ -48,18 +50,20 @@ function makePads(packId = "afterhours") {
   return pads;
 }
 function defaultSession() {
-  return { version: 1, name: "Untitled session", bpm: 110, beats: 4, bars: 2, pack: "afterhours", swing: 0, pads: makePads(), pattern: pattern(), seqEnabled: false, master: 0.8, inputLatency: 20, outputOffset: 0, jamBuffer: 120 };
+  return { rack: defaultRack(), version: 1, name: "Untitled session", bpm: 110, beats: 4, bars: 2, pack: "afterhours", swing: 0, pads: makePads(), pattern: pattern(), seqEnabled: false, master: 0.8, inputLatency: 20, outputOffset: 0, jamBuffer: 120 };
 }
 function validateSession(s) {
   if (!s || s.version !== 1 || !Array.isArray(s.pads) || s.pads.length !== 16) throw new Error("This is not a Mobipad project.");
   if (!(s.bpm >= 40 && s.bpm <= 240) || ![3, 4, 5, 6, 7].includes(s.beats) || ![1, 2, 4, 8].includes(s.bars)) throw new Error("Invalid project timing.");
   for (const [i, p] of s.pads.entries()) {
-    if (!p || p.id !== i || typeof p.name !== "string" || p.name.length > 80 || !colors.includes(p.color) || !["empty", "shot", "loop", "audio"].includes(p.kind) || !Number.isFinite(p.volume) || p.volume < 0 || p.volume > 1 || ![1, 2, 4, 8].includes(p.bars) || !Array.isArray(p.events) || p.events.length > 4096 || p.audioId !== null && (typeof p.audioId !== "string" || p.audioId.length > 100)) throw new Error("Invalid pad data.");
+    if (!validSampleSettings(p, s.beats)) throw new Error("Invalid sample settings.");
+    if (!p || p.id !== i || typeof p.name !== "string" || p.name.length > 80 || !colors.includes(p.color) || !["empty", "shot", "loop", "audio"].includes(p.kind) || !Number.isFinite(p.volume) || p.volume < 0 || p.volume > 1 || (!Number.isInteger(p.bars) || p.bars < 1 || p.bars > 512) || !Array.isArray(p.events) || p.events.length > 4096 || p.audioId !== null && (typeof p.audioId !== "string" || p.audioId.length > 100)) throw new Error("Invalid pad data.");
     for (const e of p.events) if (!e || !["piano", "bass", "guitar", "synth", "bell", ...drums].includes(e.voice) || !Number.isFinite(e.beat) || e.beat < 0 || e.beat > 224 || !Number.isFinite(e.note) || e.note < 0 || e.note > 127 || !Number.isFinite(e.duration) || e.duration <= 0 || e.duration > 30 || !Number.isFinite(e.velocity) || e.velocity < 0 || e.velocity > 1) throw new Error("Invalid note data.");
   }
+  for (const p of s.pads) for (const e of p.events) if (!validSound(e.voice, e.sound) || !validTone(e.tone)) throw new Error("Invalid note sound.");
   if (!s.pattern || !["kick", "snare", "hat", "clap"].every((k) => Array.isArray(s.pattern[k]) && s.pattern[k].length === s.beats * 4 && s.pattern[k].every((x) => typeof x === "boolean"))) throw new Error("Invalid drum pattern.");
   if (typeof s.name !== "string" || s.name.length > 100) throw new Error("Invalid session name.");
-  return { ...defaultSession(), ...s, master: Math.min(1, Math.max(0, Number(s.master) || 0)), swing: Math.min(60, Math.max(0, Number(s.swing) || 0)), inputLatency: Math.min(500, Math.max(0, Number(s.inputLatency) || 0)), outputOffset: Math.min(500, Math.max(-500, Number(s.outputOffset) || 0)), jamBuffer: Math.min(500, Math.max(40, Number(s.jamBuffer) || 120)) };
+  return { ...defaultSession(), ...s, rack: normalizeRack(s.rack), master: Math.min(1, Math.max(0, Number(s.master) || 0)), swing: Math.min(60, Math.max(0, Number(s.swing) || 0)), inputLatency: Math.min(500, Math.max(0, Number(s.inputLatency) || 0)), outputOffset: Math.min(500, Math.max(-500, Number(s.outputOffset) || 0)), jamBuffer: Math.min(500, Math.max(40, Number(s.jamBuffer) || 120)) };
 }
 export {
   colors,
