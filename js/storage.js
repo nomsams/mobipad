@@ -1,14 +1,23 @@
 let dbPromise;
 function database() {
-  return dbPromise ??= new Promise((resolve, reject) => {
+  if(dbPromise)return dbPromise;
+  const opening = new Promise((resolve, reject) => {
     const r = indexedDB.open("mobipad", 1);
     r.onupgradeneeded = () => {
       r.result.createObjectStore("projects");
       r.result.createObjectStore("samples", { keyPath: "id" });
     };
-    r.onsuccess = () => resolve(r.result);
+    r.onsuccess = () => {
+      const db=r.result;
+      db.onversionchange=()=>{db.close();if(dbPromise===opening)dbPromise=null;};
+      db.onclose=()=>{if(dbPromise===opening)dbPromise=null;};
+      resolve(db);
+    };
     r.onerror = () => reject(r.error);
   });
+  dbPromise=opening;
+  opening.catch(()=>{if(dbPromise===opening)dbPromise=null;});
+  return opening;
 }
 async function dbAction(store, mode, action) {
   const db = await database();
@@ -24,6 +33,15 @@ const loadSession = () => dbAction("projects", "readonly", (o) => o.get("current
 const saveSample = (s) => dbAction("samples", "readwrite", (o) => o.put(s));
 const getSamples = () => dbAction("samples", "readonly", (o) => o.getAll());
 const deleteSample = (id) => dbAction("samples", "readwrite", (o) => o.delete(id));
+async function saveProject(session,samples){
+  const db=await database();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(['projects','samples'],'readwrite');
+    tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||new Error('Project import was not saved.'));
+    try{for(const sample of samples)tx.objectStore('samples').put(sample);tx.objectStore('projects').put(session,'current');}
+    catch(error){tx.abort();reject(error);}
+  });
+}
 function download(data, name, type = "application/json") {
   const url = URL.createObjectURL(new Blob([data], { type }));
   const a = document.createElement("a");
@@ -51,5 +69,6 @@ export {
   getSamples,
   loadSession,
   saveSample,
+  saveProject,
   saveSession
 };

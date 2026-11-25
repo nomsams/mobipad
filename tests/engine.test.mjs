@@ -13,3 +13,9 @@ test('pad gain changes reach an existing audio bus immediately',()=>{const a=eng
 test('a rejoining audio clip resumes from its current phase',()=>{const a=engine();a.session.bpm=120;a.now=()=>12500;a.session.pads[12].audioId='test';a.buffers.set('test',{});a.active.set(12,{start:0});let call;a.launchAudio=(...args)=>call=args;a.resumeAudioPad(12);assert.equal(call[0],12);assert.equal(call[1],10.03);assert.ok(Math.abs(call[3]-5.06)<.0001);});
 test('triplet events retain their timing when a captured clip loops',()=>{const a=engine(),played=[];a.session.bpm=120;a.session.pads[12].events=[{voice:'synth',note:60,beat:1/3,duration:.2,velocity:.7}];a.active.set(12,{start:0});a.play=(e,t)=>played.push(t);a.scheduleStep(.25,10.125);assert.equal(played.length,1);assert.ok(Math.abs(played[0]-(10+1/6))<.00001);a.scheduleStep(.5,10.25);assert.equal(played.length,1);});
 test('sample alignment rotates the original audio without shortening it',()=>{const a=engine();const data=Float32Array.from({length:1000},(_,i)=>i===100?1:0);a.ctx={createBuffer:(n,len,rate)=>{const channels=Array.from({length:n},()=>new Float32Array(len));return {duration:len/rate,sampleRate:rate,numberOfChannels:n,getChannelData:i=>channels[i]};}};a.buffers.set('raw',{duration:1,sampleRate:1000,numberOfChannels:1,getChannelData:()=>data});Object.assign(a.session.pads[12],{audioId:'raw',alignment:{shift:25,enabled:true,manual:0}});const result=a.sampleBuffer(12);assert.equal(result.duration,1);assert.equal(result.getChannelData(0)[75],1);assert.equal(data[100],1);});
+
+test('count-in clicks stop at the recording beat even when scheduled ahead of time',()=>{
+  const a=engine(),clicked=[];a.capture={countIn:true,startBeat:4,start:12000};a.click=time=>clicked.push(time);
+  a.scheduleStep(3,11.5);a.scheduleStep(4,12);assert.deepEqual(clicked,[11.5]);
+  a.metro=true;a.scheduleStep(4,12);assert.deepEqual(clicked,[11.5,12]);
+});

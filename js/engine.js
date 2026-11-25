@@ -82,8 +82,8 @@ class AudioEngine extends EventTarget {
       this.interrupted=false;
       // AudioContext time can freeze while the shared musical clock keeps moving.
       // Discard old scheduled sources and resume loops at the current shared phase.
-      for(const source of this.nodes){try{source.stop();}catch{}}
-      this.nodes.clear();
+      for(const source of [...this.nodes,...this.warmNodes]){try{source.stop();}catch{}}
+      this.nodes.clear();this.warmNodes.clear();
       this.anchorAudioClock();
       this.nextStep=Math.max(0,Math.ceil(this.position()*4));this.arp.nextBeat=null;
       for(const id of this.active.keys())this.resumeAudioPad(id);
@@ -336,7 +336,7 @@ class AudioEngine extends EventTarget {
     const spb = beatDuration(this.session.bpm);
     if (Number.isInteger(beat)) {
       const accent = beat % this.session.beats === 0;
-      if (this.metro || this.capture && this.capture.countIn && this.now() < this.capture.start) this.click(time, accent);
+      if (this.metro || this.capture && this.capture.countIn && beat < this.capture.startBeat) this.click(time, accent);
     }
     if (this.session.seqEnabled) {
       const step = Math.round(beat * 4) % (this.session.beats * 4);

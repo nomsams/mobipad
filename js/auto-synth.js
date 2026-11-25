@@ -12,7 +12,7 @@ export class AutoSynth {
     $('#auto-create').onclick=()=>this.attempt(()=>this.create($('#auto-replace').checked));
     $('#auto-stop').onclick=()=>this.stopPreview();
     $('#auto-dialog').addEventListener('close',()=>{this.serial++;this.stopPreview();});
-    audio.addEventListener('transport',()=>{if(!audio.running)this.stopPreview();});
+    audio.addEventListener('transport',({detail})=>{if(!audio.running){this.stopPreview();if(detail?.cleared)this.serial++;}});
     audio.addEventListener('audiostate',()=>{if(audio.ctx.state!=='running')this.stopPreview();});
     document.addEventListener('visibilitychange',()=>{if(document.hidden)this.stopPreview();});
   }

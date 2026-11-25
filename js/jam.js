@@ -83,21 +83,26 @@ class JamRoom extends EventTarget {
     const id = "mobipad-" + this.room;
     if (!this.peer || this.peer.destroyed || this.peer.disconnected || this.connections.get(id)?.open || this.connecting) return;
     this.connecting = true;
-    const conn = this.peer.connect(id, { reliable: true, serialization: "binary", metadata: { name: this.name, device: this.device } });
-    this.wire(conn);
-    setTimeout(() => {
-      this.connecting = false;
-      if (!conn.open) conn.close();
-    }, 8e3);
+    const attempt={peer:this.peer};this.connectAttempt=attempt;
+    try{
+      const conn = attempt.conn=this.peer.connect(id, { reliable: true, serialization: "binary", metadata: { name: this.name, device: this.device } });
+      this.wire(conn);
+      attempt.timer=setTimeout(()=>{if(this.connectAttempt!==attempt)return;this.finishConnect(conn);if(!conn.open)conn.close();},8e3);
+    }catch(error){this.finishConnect(attempt.conn);this.emit('status',{message:error.message||'Connection failed. Retrying…',error:true});}
+  }
+  finishConnect(conn){
+    if(this.connectAttempt?.conn!==conn)return;
+    clearTimeout(this.connectAttempt?.timer);this.connectAttempt=null;this.connecting=false;
   }
   wire(conn) {
     const peer=this.peer;
+    let closed=false;
     conn.on("open", () => {
-      if(this.peer!==peer||!this.role){conn.close();return;}
+      if(closed||this.peer!==peer||!this.role){conn.close();return;}
       const old = this.connections.get(conn.peer);
-      if (old && old !== conn) old.close();
       this.connections.set(conn.peer, conn);
-      this.connecting = false;
+      if (old && old !== conn) old.close();
+      this.finishConnect(conn);
       conn.lastSeen = Date.now();
       this.emitPeers();
       this.emit("status", { message: this.role === "leader" ? "Connected. Your room shares one clock." : "Connected. Measuring the shared clock…" });
@@ -114,13 +119,14 @@ class JamRoom extends EventTarget {
       this.receive(data, conn);
     });
     conn.on("close", () => {
+      closed=true;
+      if(this.peer!==peer||this.connections.get(conn.peer)!==conn&&this.connectAttempt?.conn!==conn)return;
       if (this.connections.get(conn.peer) === conn) this.connections.delete(conn.peer);
-      this.connecting = false;
+      this.finishConnect(conn);
       this.emitPeers();
       this.emit("status", { message: "A phone disconnected. Rejoins automatically when it returns." });
     });
     conn.on("error", () => {
-      this.connecting = false;
       conn.close();
     });
   }
@@ -153,7 +159,8 @@ class JamRoom extends EventTarget {
   }
   sync() {
     if (this.role !== "follower") return;
-    for (let i = 0; i < 8; i++) setTimeout(() => this.send(this.hostConnection(), { type: "ping", t0: Date.now() }), i * 100);
+    const peer=this.peer,conn=this.hostConnection();
+    for (let i = 0; i < 8; i++) setTimeout(() => {if(this.peer===peer&&this.hostConnection()===conn)this.send(conn, { type: "ping", t0: Date.now() });}, i * 100);
   }
   receive(data, conn) {
     if (!data || typeof data !== "object" || typeof data.type !== "string") return;
@@ -167,7 +174,7 @@ class JamRoom extends EventTarget {
     }
     if (data.type === "pong" && this.role === "follower") {
       const t = Date.now(), rtt = t - data.t0;
-      if (rtt < 0 || rtt > 3e3 || !Number.isFinite(data.host)) return;
+      if (!Number.isFinite(data.t0) || !Number.isFinite(rtt) || rtt < 0 || rtt > 3e3 || !Number.isFinite(data.host)) return;
       this.samples.push({ rtt, offset: data.host - (data.t0 + t) / 2 });
       this.samples = this.samples.slice(-32);
       Object.assign(this, clockEstimate(this.samples));
@@ -270,13 +277,15 @@ class JamRoom extends EventTarget {
     this.emit("peers", [...this.connections.values()].map((c) => ({ id: c.peer, name: this.role === "follower" ? "Room leader" : c.metadata?.name || "Guest phone", open: c.open })));
   }
   leave(forget = true) {
+    const attempt=this.connectAttempt;this.connectAttempt=null;clearTimeout(attempt?.timer);
+    const peer=this.peer;this.peer=null;this.role=null;
+    attempt?.conn?.close();
     for (const c of this.connections.values()) c.close();
     this.connections.clear();
-    this.peer?.destroy();
-    this.peer = null;
-    this.role = null;
+    peer?.destroy();
     this.room = null;
     this.offset = 0;
+    this.rtt=0;this.samples=[];this.snapshot=null;this.lastHostSeen=0;this.seen.clear();
     this.transfers.clear();
     this.connecting = false;
     if (forget)try{localStorage.removeItem("mobipad-room");}catch{}

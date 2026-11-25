@@ -1,5 +1,7 @@
 import { analyzeBuffer, setDSPResourceMode } from "./dsp-client.js";
 import {Presentation} from './presentation.js';
+import {ScreenWakeLock} from './wake-lock.js';
+import {prepareProjectImport} from './project-import.js';
 import {resourceProfiles} from './device.js';
 import {AutoSynth} from './auto-synth.js';
 import {PerformanceTools} from './performance-tools.js';
@@ -8,7 +10,7 @@ import { bindStepEditing } from "./sequence-input.js";
 import { AudioEngine } from "./engine.js";
 import { defaultSession, validateSession, makePads, packs, padKeys, drums, drumNames, pattern, resizePattern, colors } from "./presets.js";
 import { clamp, nextBoundary, quantizeBeat, beatDuration } from "./timing.js";
-import { loadSession, saveSession, getSamples, saveSample, deleteSample, download, exportProject } from "./storage.js";
+import { loadSession, saveSession, getSamples, saveSample, saveProject, deleteSample, download, exportProject } from "./storage.js";
 import { JamRoom } from "./jam.js";
 import { InstrumentRack } from "./instrument-rack.js";
 import { soundBank, drumKits, validSound, validTone } from "./sounds.js";
@@ -16,8 +18,9 @@ import { analyzeRecording, trimSilence, planRecording, validSampleSettings } fro
 const $ = (s) => document.querySelector(s), $$ = (s) => [...document.querySelectorAll(s)];
 let seqErase = false;
 let tempoTimer = null, tempoPreparing = false;
-let operationVersion=0, startingRecording=null, warmTimer=null, warmIdle=false;
-let session = defaultSession(), samples = [], view = "pads", mode = "loop", instrument = "piano", octave = 4, selected = 12, saveTimer, toastTimer, restoring = false, recording = null, mixRecorder = null, wakeLock = null, writing = false;
+let operationVersion=0, startingRecording=null, warmTimer=null, warmIdle=false,padEditorRequest=0,projectImporting=false,importCommitting=false;
+let session = defaultSession(), samples = [], view = "pads", mode = "loop", instrument = "piano", octave = 4, selected = 12, saveTimer, toastTimer, restoring = false, recording = null, mixRecorder = null, writing = false;
+const screenWake=new ScreenWakeLock(()=>navigator.wakeLock.request('screen'));
 const audio = new AudioEngine(session), jam = new JamRoom();
 const rack = new InstrumentRack({ audio, getSession: () => session, ready:readyInstrument, perform: performNote, changed, notify: toast, onVoice: (v) => {instrument=v;queueInstrumentWarm();}, changeSound: (voice, id) => sendAction({ type: "sound", voice, id }), changeKit: (id) => sendAction({ type: "kit", id }), startTransport: () => {
   if (jam.role === "follower") throw new Error("The leader needs to start the transport for the arpeggiator.");
@@ -177,6 +180,8 @@ function renderPads() {
     b.addEventListener("keydown", attempt(async (e) => {
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
+        e.stopPropagation();
+        if(e.repeat)return;
         selected = i;
         p.kind === "empty" ? openPad(i) : await triggerPad(i);
       }
@@ -525,6 +530,7 @@ function renderSampleSequencer() {
   }
 }
 async function openPad(id) {
+  const request=++padEditorRequest,openedSession=session;
   selected = id;
   renderQuickPad();
   const p = session.pads[id];
@@ -533,10 +539,11 @@ async function openPad(id) {
     try {
       await ready(p.audioId);
     } catch (error) {
-      toast(error.message, true);
+      if(request===padEditorRequest){audio.editingSample=null;toast(error.message, true);}
       return;
     }
   }
+  if(request!==padEditorRequest||session!==openedSession||session.pads[id]!==p||selected!==id)return;
   $("#pad-name").value = p.kind === "empty" ? "" : p.name;
   $("#pad-level").value = p.volume * 100;
   $("#pad-bars").value = p.bars;
@@ -544,18 +551,20 @@ async function openPad(id) {
   openSampleEditor(p);
   $("#pad-dialog").showModal();
 }
-$('#pad-dialog').addEventListener('close',()=>{audio.editingSample=null;});
+$('#pad-dialog').addEventListener('close',()=>{padEditorRequest++;audio.editingSample=null;audio.previewCleanup?.();});
 async function triggerPad(id) {
-  const version=operationVersion;
-  await ready(session.pads[id].audioId);
-  if (session.pads[id].audioId && mode !== "shot") await audio.preparePad(id);
-  if(version!==operationVersion)return;
-  const p = session.pads[id];
+  const version=operationVersion,p=session.pads[id],shot=mode==='shot'||p.kind==='shot';
+  if(audio.ctx?.state!=='running'){await audio.init();updateAudioInfo();}
+  if(p.audioId)await ensureSample(p.audioId);
+  if(version!==operationVersion||session.pads[id]!==p)return;
+  if(p.audioId&&!shot)await audio.preparePad(id);
+  if(!audio.running&&!shot)await prepareSamples(p.audioId);
+  if(version!==operationVersion||session.pads[id]!==p)return;
   if (p.kind === "empty") return;
-  if (mode === "shot" || p.kind === "shot") {
+  if (shot) {
     const e = { type: "shot", id, at: audio.now() + session.jamBuffer };
     if (jam.role) {
-      localShots.add(e.at + ":" + id);
+      rememberLocalShot(e.at + ":" + id);
       audio.oneShot(id);
       sendAction(e);
     } else audio.oneShot(id);
@@ -571,6 +580,7 @@ async function triggerPad(id) {
   sendAction({ type: "pad", id, beat, on });
 }
 const localShots = /* @__PURE__ */ new Set();
+function rememberLocalShot(key){localShots.add(key);if(localShots.size>2048)localShots.delete(localShots.values().next().value);}
 function sendAction(action) {
   if (jam.role) jam.command(action);
   else applyAction(action);
@@ -783,7 +793,7 @@ function performNote(event, time = audio.ctx.currentTime + 3e-3, alreadyPlayed =
   }
   if (jam.role) {
     const target = at + session.jamBuffer;
-    localShots.add(target + ":" + e.note + ":" + e.voice);
+    rememberLocalShot(target + ":" + e.note + ":" + e.voice);
     sendAction({ type: "note", ...e, at: target });
   }
 }
@@ -802,18 +812,20 @@ bind("#shot-mode", "click", () => {
   $("#loop-mode").setAttribute("aria-pressed", "false");
 });
 async function togglePlay() {
-  await ready();
   if (jam.role === "follower") throw new Error("The room leader controls transport.");
-  if (recording) await cancelRecording();
-  sendAction(audio.running ? { type: "stop" } : { type: "start", epoch: audio.now() + 250 });
+  if(audio.running){const cancelling=cancelRecording();sendAction({type:'stop'});await cancelling;return;}
+  const version=operationVersion;await ready();
+  if(version!==operationVersion)return;
+  sendAction({ type: "start", epoch: audio.now() + 250 });
 }
 bind("#play-btn", "click", togglePlay);
 bind("#stop-btn", "click", async () => {
-  await cancelRecording();
+  const cancelling=cancelRecording();
   if (jam.role === "follower") {
     audio.stop();
     toast("Stopped on this phone. Resync to follow the leader again.");
   } else sendAction({ type: "stop" });
+  await cancelling;
 });
 bind("#stop-loops", "click", () => {
   if (jam.role === "follower") throw new Error("The leader controls all loops. Tap a pad to stop that layer.");
@@ -885,13 +897,11 @@ bind("#seq-erase", "click", () => {
   $("#seq-erase").textContent = seqErase ? "Erase: on" : "Erase: off";
 });
 bind("#seq-clear", "click", () => {
-  for (const [voice, steps] of Object.entries(session.pattern)) steps.forEach((on, index) => {
-    if (on) sendAction({ type: "step", voice, index, on: false });
-  });
+  sendAction({type:'groove',beats:session.beats,enabled:session.seqEnabled,pattern:Object.fromEntries(Object.keys(session.pattern).map(voice=>[voice,Array(session.beats*4).fill(false)]))});
 });
 bind("#drum-preset", "change", () => {
   const p = pattern($("#drum-preset").value, session.beats);
-  for (const [voice, steps] of Object.entries(p)) steps.forEach((on, index) => sendAction({ type: "step", voice, index, on }));
+  sendAction({type:'groove',beats:session.beats,enabled:session.seqEnabled,pattern:p});
 });
 bind("#seq-to-pad", "click", () => {
   const id = emptyPad(), events = [];
@@ -1027,13 +1037,14 @@ async function finishRecording() {
   if (!recording || writing) return;
   writing = true;
   const r = recording;
-  const recordedSession=session,recordedPad=session.pads[r.id];
+  const recordedSession=session,recordedPad=session.pads[r.id],version=operationVersion;
   recording = null;
   audio.capture = null;
   try {
     let pad = { ...session.pads[r.id], name: r.kind === "mic" ? "Mic loop" : "My " + instrument, kind: r.kind === "mic" ? "audio" : "loop", events: r.events, audioId: null, bars: r.bars, volume: 0.75 };
     if (r.mic) {
       await r.mic.stop();
+      if(version!==operationVersion||session!==recordedSession||session.pads[r.id]!==recordedPad)return;
       const b = audio.micBuffer(r.mic, r.startAudio, r.startAudio + (r.end - r.start) / 1e3), wav = audio.bufferWav(b);
       const s = await addSample("Mic loop " + (/* @__PURE__ */ new Date()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), new Blob([wav], { type: "audio/wav" }), crypto.randomUUID(), b);
       pad.audioId = s.id;
@@ -1044,7 +1055,7 @@ async function finishRecording() {
       toast("No notes in that take. Give it another go.");
       return;
     }
-    if(session!==recordedSession||session.pads[r.id]!==recordedPad)return;
+    if(version!==operationVersion||session!==recordedSession||session.pads[r.id]!==recordedPad)return;
     sendAction({ type: "setpad", pad });
     selected = r.id;
     renderQuickPad();
@@ -1077,7 +1088,7 @@ audio.addEventListener('audiostate',()=>{
 });
 bind('#resume-audio','click',async()=>{await ready();$('#resume-audio').hidden=audio.ctx.state==='running';});
 audio.addEventListener("transport", ({detail}) => {
-  if(!audio.running&&detail?.cleared){operationVersion++;startingRecording=null;clearTimeout(tempoTimer);tempoTimer=null;tempoPreparing=false;renderTiming();}
+  if(!audio.running&&detail?.cleared){operationVersion++;startingRecording=null;padEditorRequest++;clearTimeout(tempoTimer);tempoTimer=null;tempoPreparing=false;attempt(cancelRecording)();renderTiming();}
   $('#resume-audio').hidden=!audio.running||audio.ctx?.state==='running';
   const b = $("#play-btn");
   b.classList.toggle("playing", audio.running);
@@ -1086,20 +1097,13 @@ audio.addEventListener("transport", ({detail}) => {
   presentation.syncFocus();
   $("#transport-status").textContent = audio.running ? "IN THE GROOVE" : "READY WHEN YOU ARE";
   renderPadStates();
-  if (!audio.running) wakeLock?.release().catch(() => {
-  });
+  requestWake();
 });
-async function requestWake() {
-  if ($("#keep-awake").checked && navigator.wakeLock && document.visibilityState === "visible") {
-    try {
-      wakeLock = await navigator.wakeLock.request("screen");
-    } catch {
-    }
-  }
-}
+function requestWake(){return screenWake.set(Boolean(audio.running&&$('#keep-awake').checked&&navigator.wakeLock&&document.visibilityState==='visible'));}
+bind('#keep-awake','change',requestWake);
 document.addEventListener("visibilitychange", () => {
+  requestWake();
   if (document.visibilityState === "visible" && audio.running) {
-    requestWake();
     if (jam.role === "follower") jam.sync();
   }
 });
@@ -1111,30 +1115,31 @@ bind("#project-name", "change", () => {
 bind("#project-export", "click", () => exportProject(session, samples));
 bind("#project-import", "click", () => $("#project-file").click());
 bind("#project-file", "change", async () => {
-  if (jam.role) throw new Error("Leave the jam room before importing a project.");
-  if (recording) throw new Error("Finish your recording first.");
   const file = $("#project-file").files[0];
   $("#project-file").value = "";
-  if (!file) return;
+  if(!file)return;
+  if(projectImporting)throw Error('A project is already being prepared.');
+  if (jam.role) throw new Error("Leave the jam room before importing a project.");
+  if (recording||startingRecording||writing) throw new Error("Finish your recording first.");
   if (file.size > 100 * 1024 * 1024) throw new Error("Project is too large (100 MB maximum).");
-  const data = JSON.parse(await file.text()), valid = validateSession(data.session);
-  if (!Array.isArray(data.audio) || data.audio.length > 128) throw new Error("Invalid project audio.");
-  await ready();
-  const imported = [];
-  for (const s of data.audio) {
-    if (typeof s.data !== "string" || s.data.length > 36 * 1024 * 1024 || typeof s.id !== "string" || typeof s.name !== "string") throw new Error("Invalid project sample.");
-    const bytes = Uint8Array.from(atob(s.data), (c) => c.charCodeAt(0));
-    imported.push(await addSample(s.name, new Blob([bytes], { type: s.type || "audio/wav" }), s.id));
-  }
-  if (valid.pads.some((p) => p.audioId && !samples.some((s) => s.id === p.audioId))) throw new Error("Project is missing an audio sample.");
+  const version=operationVersion,previousSession=session,dialog=$('#project-dialog');projectImporting=true;
+  $('#project-import').disabled=true;$('#project-new').disabled=true;toast('Checking the whole project before restoring…');
+  try{
+  const data=JSON.parse(await file.text());await readyInstrument();
+  const prepared=await prepareProjectImport(data,{decode:bytes=>audio.ctx.decodeAudioData(bytes),analyze:analyzeBuffer});
+  if(version!==operationVersion||session!==previousSession||jam.role||recording||startingRecording||writing)throw Error('The session changed during import. Try again when it is ready.');
+  importCommitting=true;clearTimeout(saveTimer);if(!dialog.open)dialog.showModal();dialog.inert=true;$('.app-shell').inert=true;
+  await saveProject(prepared.session,prepared.samples);
   audio.stop();
-  session = valid;
+  session = prepared.session;samples.push(...prepared.samples);
   performanceTools.resetMemory();
   renderAll();
   changed();
   $("#project-dialog").close();
   toast("Project restored. Welcome back.");
+  }finally{projectImporting=false;importCommitting=false;dialog.inert=false;$('.app-shell').inert=false;$('#project-import').disabled=false;$('#project-new').disabled=false;if(session===previousSession)changed();}
 });
+$('#project-dialog').addEventListener('cancel',event=>{if(importCommitting)event.preventDefault();});
 bind("#project-new", "click", async () => {
   if (jam.role) throw new Error("Leave your jam room before starting a new session.");
   await cancelRecording();
@@ -1173,16 +1178,20 @@ bind("#export-mix", "click", async () => {
   toast("Recording the mix. Tap Finish mix to download.");
 });
 document.addEventListener("keydown", attempt(async (e) => {
+  if(importCommitting)return;
+  if(e.ctrlKey||e.metaKey||e.altKey||e.isComposing)return;
   if (e.target.matches("input,select,textarea") || $("dialog[open]")) return;
   if (e.code === "Space") {
+    if(e.target.closest('button,[role=button]'))return;
     e.preventDefault();
     if (!e.repeat) await togglePlay();
     return;
   }
   if (e.key === "Escape") {
     if(presentation.handleEscape())return;
-    await cancelRecording();
+    const cancelling=cancelRecording();
     audio.stop();
+    await cancelling;
     return;
   }
   if (e.repeat) return;
@@ -1230,12 +1239,18 @@ document.addEventListener('visibilitychange',tick);
 const audioImports = /* @__PURE__ */ new Map();
 function actionSample(a){return a?.pad?.audioId||(['pad','shot','samplestep','sampleseq'].includes(a?.type)?session.pads[a.id]?.audioId:null);}
 let incomingCommands = Promise.resolve();
+function queueRoomUpdate(work){
+  const peer=jam.peer,isCurrent=()=>jam.peer===peer&&jam.role==='follower';
+  incomingCommands=incomingCommands.then(()=>{if(isCurrent())return work(isCurrent);}).catch(e=>{if(isCurrent())toast(e.message,true);});
+}
 function leaderCommand({ packet, remote, conn }) {
   if (!validateAction(packet.action, remote)) {
     if (conn) jam.send(conn, { type: "rejected" });
     return;
   }
+  const peer=jam.peer,commandSession=session;
   const perform = () => {
+    if(jam.peer!==peer||jam.role!=='leader'||session!==commandSession)return;
     applyAction(packet.action);
     if (jam.role === "leader") jam.accept(packet);
   };
@@ -1251,7 +1266,7 @@ jam.addEventListener("command", ({ detail }) => {
   }
 });
 jam.addEventListener("accepted", ({ detail }) => {
-  incomingCommands = incomingCommands.then(async () => {
+  queueRoomUpdate(async isCurrent => {
     if (!audio.ctx) await ready();
     if (detail.action?.type === "timing") await audio.prepareTempo(detail.action.bpm, detail.action.beats);
     const pending = audioImports.get(detail.action?.pad?.audioId);
@@ -1259,8 +1274,8 @@ jam.addEventListener("accepted", ({ detail }) => {
     await prepareSamples(actionSample(detail.action));
     if(detail.action?.type==='scene')for(const id of detail.action.scene.padIds){await ensureSample(session.pads[id]?.audioId);if(session.pads[id]?.audioId)await audio.preparePad(id);}
     if (["timing", "stop", "pack"].includes(detail.action?.type)) await cancelRecording();
-    applyAction(detail.action);
-  }).catch((e) => toast(e.message, true));
+    if(isCurrent())applyAction(detail.action);
+  });
 });
 function snapshot() {
   return { type: "snapshot", session: structuredClone(session), running: audio.running, epoch: audio.epoch, active: [...audio.active], pending: [...audio.pending],scenePending:audio.pendingScene||null };
@@ -1269,18 +1284,21 @@ jam.addEventListener("welcome", attempt(async ({ detail: { conn } }) => {
   jam.send(conn, snapshot());
   for (const s of samples.filter((s2) => session.pads.some((p) => p.audioId === s2.id))) await jam.sendAudio(s, conn);
 }));
-jam.addEventListener("snapshot", attempt(async ({ detail: s }) => {
+jam.addEventListener("snapshot", ({ detail: s }) => queueRoomUpdate(async isCurrent => {
   const valid = validateSession(s.session);
   await cancelRecording();
   await ready();
+  if(!isCurrent())return;
   const local = { master: session.master, inputLatency: session.inputLatency, outputOffset: session.outputOffset, jamBuffer: session.jamBuffer };
   session = { ...valid, ...local };
   audio.session = session;
   performanceTools.resetMemory();
   audio.stop();
+  const version=operationVersion;
   const entries = Array.isArray(s.active) ? s.active : [];
   audio.active = new Map(entries.filter((x) => Array.isArray(x) && Number.isInteger(x[0]) && x[0] >= 0 && x[0] < 16 && Number.isFinite(x[1]?.start)));
   await prepareSamples();
+  if(!isCurrent()||version!==operationVersion)return;
   if (s.running && Number.isFinite(s.epoch)) audio.start(s.epoch);
   if (Array.isArray(s.pending)) {
     for (const [id, p] of s.pending) if (Number.isInteger(id) && id >= 0 && id < 16 && Number.isFinite(p?.beat) && typeof p.on === "boolean") audio.pending.set(id, p);
@@ -1295,15 +1313,17 @@ jam.addEventListener("clock", ({ detail }) => {
   $("#jam-status").textContent = `Connected · ${Math.round(detail.rtt)} ms round trip · clock offset ${Math.round(detail.offset)} ms. Leader controls tempo and transport.`;
 });
 jam.addEventListener("audio", ({ detail: s }) => {
+  const peer=jam.peer;
   const task = (async () => {
     const sample = await addSample(s.name, s.blob, s.id);
+    if (jam.peer!==peer)return;
     if (jam.role === "leader") {
       for (const c of jam.connections.values()) if (c !== s.conn) await jam.sendAudio(sample, c);
     }
     renderPads();
   })();
   audioImports.set(s.id, task);
-  task.catch((e) => toast(e.message, true)).finally(() => audioImports.delete(s.id));
+  task.catch((e) => {if(jam.peer===peer)toast(e.message, true);}).finally(() => {if(audioImports.get(s.id)===task)audioImports.delete(s.id);});
 });
 jam.addEventListener("status", ({ detail }) => {
   $("#jam-status").textContent = detail.message;
@@ -1325,6 +1345,8 @@ function roomLink() {
   return u.href;
 }
 jam.addEventListener("room", ({ detail }) => {
+  localShots.clear();
+  incomingCommands=Promise.resolve();
   $("#jam-room").hidden = false;
   $("#jam-role").textContent = detail.role === "leader" ? "ROOM LEADER" : "FOLLOWER";
   $("#room-label").textContent = detail.room;
@@ -1361,6 +1383,7 @@ bind("#join-btn", "click", async () => {
 bind("#leave-btn", "click", async () => {
   await cancelRecording();
   jam.leave();
+  localShots.clear();
   audio.clockOffset = 0;
   audio.stop();
   $("#jam-room").hidden = true;

@@ -191,6 +191,7 @@ class InstrumentRack {
     if (this.state().arp.enabled && voice !== "drums" && !drums.includes(voice)) {
       if (this.pendingNotes.get(key) !== token && !this.state().arp.latch) return;
       if (!this.audio.running) await this.startTransport();
+      if (generation !== this.generation) return;
       if (this.pendingNotes.get(key) !== token && !this.state().arp.latch) return;
       this.audio.arp.voice = voice;
       this.audio.arp.sound = event.sound;
@@ -205,6 +206,9 @@ class InstrumentRack {
     this.pendingNotes?.delete(key);
     this.audio.arp.release(key);
     this.pointers.delete(key);
+    this.slideNotes.delete(key);
+    const target=this.slideTargets?.get(key);this.slideTargets?.delete(key);
+    if(target&&![...this.slideTargets.values()].includes(target))target.classList.remove('pressed');
     this.renderArpStatus();
   }
   releaseAll() {
@@ -214,6 +218,7 @@ class InstrumentRack {
     this.pointers.clear();
     this.keyNotes.clear();
     this.slideNotes.clear();
+    this.slideTargets?.clear();
     document.querySelectorAll(".pressed").forEach((e) => e.classList.remove("pressed"));
     this.renderArpStatus();
   }
@@ -221,23 +226,21 @@ class InstrumentRack {
     const notes = this.audio.arp.notes(this.state().arp);
     $("#arp-notes").textContent = notes.length ? (note !== null ? "Playing " + noteName(note) + " · " : "") + [...new Set(notes)].map(noteName).join(" · ") : "Waiting for a few notes.";
   }
-  bindPlayable(button, note, voice = this.voice) {
-    let released = false;
+  bindSurface(button, play, release, keyboardKey) {
+    const held=new Map();
+    const refresh=()=>{for(const [key,generation] of held)if(generation!==this.generation)held.delete(key);button.classList.toggle('pressed',held.size>0);};
     button.onpointerdown = this.safely(async (e) => {
+      if(e.button!==undefined&&e.button!==0)return;
       e.preventDefault();
-      released = false;
       const key = "pointer:" + e.pointerId;
-      const playing=this.press(note,key,voice);
-      button.classList.add('pressed');
-      button.setPointerCapture(e.pointerId);
-      await playing;
-      if (released) this.release(key);
-      else button.classList.add("pressed");
+      held.set(key,this.generation);
+      const playing=play(key);
+      refresh();
+      try{button.setPointerCapture(e.pointerId);}catch{} // A fast release can invalidate capture while audio is waking.
+      try{await playing;}catch(error){held.delete(key);release(key);throw error;}finally{refresh();}
     });
     const up = (e) => {
-      released = true;
-      this.release("pointer:" + e.pointerId);
-      button.classList.remove("pressed");
+      const key="pointer:"+e.pointerId;held.delete(key);release(key);refresh();
     };
     button.onpointerup = up;
     button.onpointercancel = up;
@@ -246,15 +249,22 @@ class InstrumentRack {
       if ((e.key === " " || e.key === "Enter") && !e.repeat) {
         e.preventDefault();
         e.stopPropagation();
-        await this.press(note, "button:" + note, voice);
+        const key=keyboardKey+':'+e.key;held.set(key,this.generation);refresh();
+        try{await play(key);}catch(error){held.delete(key);release(key);throw error;}finally{refresh();}
       }
     });
     button.onkeyup = (e) => {
       if (e.key === " " || e.key === "Enter") {
         e.stopPropagation();
-        this.release("button:" + note);
+        const key=keyboardKey+':'+e.key;held.delete(key);release(key);refresh();
       }
     };
+  }
+  bindPlayable(button, note, voice = this.voice) {
+    this.bindSurface(button,key=>this.press(note,key,voice),key=>this.release(key),'button:'+voice+':'+note);
+  }
+  bindChord(button,notes,name){
+    this.bindSurface(button,key=>this.state().arp.enabled?Promise.all(notes.map((note,i)=>this.press(note,key+':'+i))):this.strum(notes),key=>notes.forEach((_,i)=>this.release(key+':'+i)),'chord:'+name);
   }
   renderKeyboard() {
     const keyboard = $("#keyboard");
@@ -307,14 +317,15 @@ class InstrumentRack {
         b.onpointermove = this.safely(async (e) => {
           if (!(e.buttons & 1) || e.pointerType === "mouse" && e.buttons !== 1) return;
           const target = document.elementFromPoint(e.clientX, e.clientY)?.closest(".fret");
-          if (!target || target.dataset.string !== b.dataset.string || target === b) return;
+          if (!target || target.dataset.string !== b.dataset.string || !this.pendingNotes?.has('pointer:'+e.pointerId)) return;
           const key = "pointer:" + e.pointerId, moved = tuning[string] + Number(target.dataset.fret);
           if (this.slideNotes.get(key) === moved) return;
-          this.slideNotes.set(key, moved);
           this.release(key);
+          this.slideNotes.set(key, moved);
+          this.slideTargets??=new Map();this.slideTargets.set(key,target);
+          const generation=this.generation;
           await this.press(moved, key);
-          row.querySelectorAll(".pressed").forEach((e2) => e2.classList.remove("pressed"));
-          target.classList.add("pressed");
+          if(generation===this.generation&&this.pendingNotes.has(key))target.classList.add("pressed");
         });
         row.append(b);
       }
@@ -326,35 +337,7 @@ class InstrumentRack {
       const b = node("button", "chord-pad"), name = node("strong", "", chord.name), shape = node("span", "", this.voice === "guitar" ? chord.guitar.slice().reverse().map((f) => f < 0 ? "×" : f).join(" ") : "Root · fifth · octave");
       b.append(name, shape);
       const notes = this.voice === "guitar" ? chord.guitar.flatMap((f, i) => f < 0 ? [] : [tuning[i] + f]).reverse() : [chord.notes[0] - 12, chord.notes[0] - 5, chord.notes[0]];
-      let keys = [];
-      b.onpointerdown = this.safely(async (e) => {
-        e.preventDefault();
-        b.setPointerCapture(e.pointerId);
-        b.classList.add("pressed");
-        if (this.state().arp.enabled) {
-          keys = notes.map((n, i) => "chord:" + e.pointerId + ":" + i);
-          await Promise.all(notes.map((n, i) => this.press(n, keys[i])));
-        } else await this.strum(notes);
-      });
-      const release = () => {
-        keys.forEach((k) => this.release(k));
-        keys = [];
-        b.classList.remove("pressed");
-      };
-      b.onpointerup = release;
-      b.onpointercancel = release;
-      b.onlostpointercapture = release;
-      b.onkeydown = this.safely(async (e) => {
-        if ((e.key === " " || e.key === "Enter") && !e.repeat) {
-          e.preventDefault();
-          e.stopPropagation();
-          if (this.state().arp.enabled) {
-            keys = notes.map((n, i) => "chord-key:" + chord.name + i);
-            await Promise.all(notes.map((n, i) => this.press(n, keys[i])));
-          } else await this.strum(notes);
-        }
-      });
-      b.onkeyup = release;
+      this.bindChord(b,notes,chord.name);
       chords.append(b);
     }
   }

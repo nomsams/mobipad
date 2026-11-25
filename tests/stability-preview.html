@@ -1,0 +1,5 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mobipad app recovery checks</title><style>body{margin:0;background:#19201a;color:#caee91;font:15px system-ui}iframe{border:0;width:100%;height:100vh}</style></head><body><iframe title="Isolated recovery test studio" allow="fullscreen"></iframe><script type="module">
+// Run on a separate localhost port: this harness seeds a disposable QA project.
+const base=new URL('../',location.href),html=await(await fetch(new URL('index.html',base))).text();
+document.querySelector('iframe').srcdoc=html.replace('<head>','<head><base href="'+base.href+'">').replace('<script type="module" src="./js/app.js"></'+'script>','<script type="module" src="./tests/stability-bootstrap.js"></'+'script>');
+</script></body></html>
