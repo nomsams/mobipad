@@ -63,6 +63,8 @@ function validSampleSettings(p, beats = 4) {
   if (p.preDelay !== void 0 && (!Number.isFinite(p.preDelay) || p.preDelay < 0 || p.preDelay > 1e3)) return false;
   if (p.echo !== void 0 && (!Number.isFinite(p.echo) || p.echo < 0 || p.echo > 0.7)) return false;
   if (p.echoTime !== void 0 && (!Number.isFinite(p.echoTime) || p.echoTime < 0.05 || p.echoTime > 1)) return false;
+  if(p.reverb!==undefined&&(!Number.isFinite(p.reverb)||p.reverb<0||p.reverb>.8))return false;
+  if(p.reverbSpace!==undefined&&!['room','plate','hall'].includes(p.reverbSpace))return false;
   if (p.sequenceEnabled !== void 0 && typeof p.sequenceEnabled !== "boolean") return false;
   if (p.steps !== void 0 && (!Array.isArray(p.steps) || p.steps.length > 28 || p.steps.some((s) => typeof s !== "boolean"))) return false;
   const a = p.alignment;

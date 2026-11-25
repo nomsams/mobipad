@@ -83,6 +83,9 @@ function detectKey(samples, rate) {
       chroma[(note % 12 + 12) % 12] += Math.sqrt(amp);
     }
   }
+  return keyFromChroma(chroma);
+}
+function keyFromChroma(chroma){
   if (chroma.reduce((s, v) => s + v, 0) < 0.1 || chroma.filter((v) => v > Math.max(...chroma) * 0.2).length < 3) return { key: null, keyConfidence: 0 };
   const ranked = [];
   for (let root = 0; root < 12; root++) for (const [mode, profile] of [["major", major], ["minor", minor]]) {
@@ -100,5 +103,6 @@ function analyzeTrack(samples, rate) {
 export {
   analyzeTrack,
   detectKey,
-  detectTempo
+  detectTempo,
+  keyFromChroma
 };

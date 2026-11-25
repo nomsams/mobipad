@@ -77,3 +77,11 @@ The following remain to be tested on actual phones; they are not claimed as veri
 - GitHub Pages deployment and a repository-subpath URL, including HTTPS recording and invite URLs.
 
 Deployment target: `nomsams/mobipad`, with site URL `https://nomsams.github.io/mobipad/`. New commits use a GitHub noreply identity. Existing repository history is preserved.
+
+## Stage, Eco and Auto synth update
+
+- Automated tests cover device detection (including desktop-identifying iPads with a connected mouse), layout/resource overrides, byte-based LRU caches, protected sample loops, DSP timeout recovery, interrupted audio, bounded microphone shutdown, storage denial, signaling failure, and stale instrument presses.
+- Exact CSS viewport checks at 320 × 568, 390 × 844, 768 × 1024 and 1024 × 768 show all 16 pads above the dock/navigation and no horizontal document overflow. Tablet geometry was checked in Stage; iPad identification is covered by unit fixtures rather than a physical iPad.
+- Browser UI checks covered compact navigation, Settings timing/project access, Studio/Stage control restoration, Eco/Full switching, sequencer left-add/right-remove, note capture back to a pad, generated-melody import, Auto synth key review, preview, synth-pad creation and editable persistent effects. Changing effects retains the playing loop.
+- The audio harness renders all 58 sounds, captures a generated signal through the worklet, verifies exact WAV length and pitch-preserving stretching, and resumes a sample after suspend/resume. It also recovers four deliberately detuned melody notes in the background worker, tunes against a selected key, exercises automatic take conversion with default pure tone/natural rhythm, and renders a native stereo hall reverb tail.
+- Auto synth is monophonic and intentionally rejects silence/noise; transcription and key estimates need listening checks on real sung vocals. Real-device microphone latency, iOS interruption behavior, multitouch and multi-phone acoustics remain hardware acceptance items.

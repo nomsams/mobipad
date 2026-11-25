@@ -16,6 +16,7 @@ class InstrumentRack {
     this.pointers = /* @__PURE__ */ new Map();
     this.keyNotes = /* @__PURE__ */ new Map();
     this.slideNotes = /* @__PURE__ */ new Map();
+    this.generation=0;
     this.bind();
   }
   safely(fn) {
@@ -91,6 +92,8 @@ class InstrumentRack {
     });
     this.audio.addEventListener("transport", () => {
       if (!this.audio.running) {
+        this.generation++;
+        this.pendingNotes?.clear();
         this.pointers.clear();
         this.keyNotes.clear();
         this.renderArpStatus();
@@ -98,7 +101,8 @@ class InstrumentRack {
     });
     this.audio.addEventListener("arpnote", ({ detail }) => {
       this.perform(detail.event, detail.time, true);
-      this.renderArpStatus(detail.event.note);
+      const now=performance.now();
+      if(this.audio.resourceMode!=='eco'||now-(this.lastArpDraw||0)>120){this.lastArpDraw=now;this.renderArpStatus(detail.event.note);}
     });
   }
   state() {
@@ -179,8 +183,10 @@ class InstrumentRack {
   async press(note, key, voice = this.voice) {
     this.pendingNotes ??= /* @__PURE__ */ new Map();
     const token = {};
+    const generation=this.generation;
     this.pendingNotes.set(key, token);
     await this.ready();
+    if(generation!==this.generation)return;
     const event = this.event(note, voice);
     if (this.state().arp.enabled && voice !== "drums" && !drums.includes(voice)) {
       if (this.pendingNotes.get(key) !== token && !this.state().arp.latch) return;
@@ -202,6 +208,7 @@ class InstrumentRack {
     this.renderArpStatus();
   }
   releaseAll() {
+    this.generation++;
     this.pendingNotes?.clear();
     this.audio.arp.clear();
     this.pointers.clear();
@@ -350,7 +357,9 @@ class InstrumentRack {
     }
   }
   async strum(notes) {
+    const generation=this.generation;
     await this.ready();
+    if(generation!==this.generation)return;
     const order = $("#strum-direction").value === "up" ? [...notes].reverse() : notes, spread = Number($("#strum-spread").value) / 1e3;
     for (const [i, note] of order.entries()) this.perform({ ...this.event(note), velocity: 0.6 + i * 0.025 }, this.audio.ctx.currentTime + 5e-3 + i * spread);
   }

@@ -4,13 +4,16 @@ import { getSound, defaultRack } from "./sounds.js";
 import { pluckedString } from "./string-model.js";
 import { Arpeggiator } from "./arpeggiator.js";
 import { requestDSP } from "./dsp-client.js";
+import {AudioCache} from './audio-cache.js';
+import {resourceProfiles} from './device.js';
+import {createReverb} from './effects.js';
 class AudioEngine extends EventTarget {
   constructor(session) {
     super();
     this.session = session;
     this.active = /* @__PURE__ */ new Map();
     this.pending = /* @__PURE__ */ new Map();
-    this.buffers = /* @__PURE__ */ new Map();
+    this.buffers = new AudioCache(resourceProfiles.full.rawBytes,key=>this.isSamplePinned(key));
     this.nodes = /* @__PURE__ */ new Set();
     this.running = false;
     this.epoch = 0;
@@ -23,12 +26,16 @@ class AudioEngine extends EventTarget {
     this.noise = null;
     this.readyPromise = null;
     this.arp = new Arpeggiator();
-    this.stringBuffers = /* @__PURE__ */ new Map();
-    this.processedBuffers = /* @__PURE__ */ new Map();
+    this.stringBuffers = new AudioCache(resourceProfiles.full.stringBytes);
+    this.processedBuffers = new AudioCache(resourceProfiles.full.processedBytes,key=>this.isSamplePinned(String(key).split(':')[0]));
     this.padEffects = /* @__PURE__ */ new Map();
-    this.stretchedBuffers = /* @__PURE__ */ new Map();
+    this.stretchedBuffers = new AudioCache(resourceProfiles.full.stretchBytes,key=>this.isSamplePinned(String(key).split(':')[0]));
     this.stretchTasks = /* @__PURE__ */ new Map();
+    this.sampleVersions = new Map();
+    this.resourceMode='full';this.maxSources=resourceProfiles.full.maxSources;
   }
+  isSamplePinned(id){if(this.editingSample===id)return true;return this.session.pads.some(p=>p.audioId===id&&(this.active.has(p.id)||this.pending.get(p.id)?.on||this.running&&this.session.seqEnabled&&p.sequenceEnabled||[...this.nodes].some(n=>n.padId===p.id)));}
+  setResourceMode(mode){this.resourceMode=mode==='eco'?'eco':'full';const profile=resourceProfiles[this.resourceMode];this.maxSources=profile.maxSources;this.buffers.setBudget?.(profile.rawBytes);this.stringBuffers.setBudget?.(profile.stringBytes);this.processedBuffers.setBudget?.(profile.processedBytes);this.stretchedBuffers.setBudget?.(profile.stretchBytes);}
   async init() {
     if (!this.ctx) {
       const C = window.AudioContext || window.webkitAudioContext;
@@ -47,13 +54,27 @@ class AudioEngine extends EventTarget {
       this.noise = this.ctx.createBuffer(1, this.ctx.sampleRate * 2, this.ctx.sampleRate);
       const a = this.noise.getChannelData(0);
       for (let i = 0; i < a.length; i++) a[i] = Math.random() * 2 - 1;
-      this.ctx.onstatechange = () => this.dispatchEvent(new Event("audiostate"));
+      this.ctx.onstatechange = () => this.handleAudioState();
     }
     await this.ctx.resume();
     return this.ctx;
   }
   now() {
     return Date.now() + this.clockOffset;
+  }
+  handleAudioState() {
+    if(this.ctx.state!=='running')this.interrupted=this.running;
+    else if(this.interrupted&&this.running){
+      this.interrupted=false;
+      // AudioContext time can freeze while the shared musical clock keeps moving.
+      // Discard old scheduled sources and resume loops at the current shared phase.
+      for(const source of this.nodes){try{source.stop();}catch{}}
+      this.nodes.clear();
+      this.nextStep=Math.max(0,Math.ceil(this.position()*4));this.arp.nextBeat=null;
+      for(const id of this.active.keys())this.resumeAudioPad(id);
+      this.schedule();
+    }
+    this.dispatchEvent(new Event('audiostate'));
   }
   position() {
     return this.running ? positionAt(this.now(), this.epoch, this.session.bpm) : 0;
@@ -63,21 +84,23 @@ class AudioEngine extends EventTarget {
   }
   start(epoch = this.now() + 140) {
     if (!this.ctx) throw new Error("Audio is not initialized.");
-    this.stop(false);
+    this.stop(false, false);
     this.epoch = epoch;
     this.running = true;
+    this.interrupted=this.ctx.state!=='running';
     this.nextStep = Math.max(0, Math.ceil(this.position() * 4));
     this.arp.nextBeat = null;
     this.arp.index = 0;
     this.timer = setInterval(() => this.schedule(), 20);
     this.schedule();
-    for (const id of this.active.keys()) this.resumeAudioPad(id);
+    if(!this.interrupted)for (const id of this.active.keys()) this.resumeAudioPad(id);
     this.dispatchEvent(new Event("transport"));
   }
-  stop(clear = true) {
+  stop(clear = true, notify = true) {
     this.previewCleanup?.();
     clearInterval(this.timer);
     this.running = false;
+    this.interrupted=false;
     for (const n of this.nodes) {
       try {
         n.stop();
@@ -86,11 +109,16 @@ class AudioEngine extends EventTarget {
     }
     this.nodes.clear();
     this.pending.clear();
+    // Recreate delay lines so Stop also clears audio still circulating in feedback.
+    for(const fx of this.padEffects.values()){fx.delay.disconnect();fx.wet.disconnect();fx.feedback.disconnect();fx.reverb?.dispose();}
+    for(const bus of this.padBuses?.values()||[])bus.disconnect();
+    this.padEffects.clear();this.padBuses?.clear();
     if (clear) {
       this.active.clear();
       this.arp.clear();
+      for(const cache of [this.buffers,this.stringBuffers,this.processedBuffers,this.stretchedBuffers])cache.trim?.();
     }
-    this.dispatchEvent(new Event("transport"));
+    if(notify)this.dispatchEvent(new CustomEvent('transport',{detail:{cleared:clear}}));
   }
   cancelPad(id, when = this.ctx?.currentTime) {
     for (const n of this.nodes) if (n.padId === id) {
@@ -101,7 +129,7 @@ class AudioEngine extends EventTarget {
     }
   }
   bus(id) {
-    if (id === null || id === void 0) return this.master;
+    if (typeof id!=='number') return this.master;
     this.padBuses ??= /* @__PURE__ */ new Map();
     if (!this.padBuses.has(id)) {
       const gain = this.ctx.createGain();
@@ -129,6 +157,11 @@ class AudioEngine extends EventTarget {
     fx.delay.delayTime.setTargetAtTime(p.echoTime || 0.25, this.ctx.currentTime, 0.02);
     fx.wet.gain.setTargetAtTime(p.echo || 0, this.ctx.currentTime, 0.015);
     fx.feedback.gain.setTargetAtTime((p.echo || 0) * 0.55, this.ctx.currentTime, 0.015);
+    if(p.reverb>0){
+      const space=p.reverbSpace||'room';
+      if(fx.reverb?.space!==space){fx.reverb?.dispose();fx.reverb=createReverb(this.ctx,this.padBuses.get(id),this.master,p.reverb,space);}
+      else fx.reverb.wet.gain.setTargetAtTime(p.reverb*.65,this.ctx.currentTime,.015);
+    }else{fx.reverb?.dispose();fx.reverb=null;}
   }
   sampleBuffer(id) {
     const p = this.session.pads[id], original = this.buffers.get(p.audioId);
@@ -147,13 +180,12 @@ class AudioEngine extends EventTarget {
       }
     }
     this.processedBuffers.set(key, buffer);
-    if (this.processedBuffers.size > 24) this.processedBuffers.delete(this.processedBuffers.keys().next().value);
     return buffer;
   }
   stretchKey(id, bpm = this.session.bpm, beats = this.session.beats) {
     const p = this.session.pads[id], buffer = this.sampleBuffer(id);
     if (!buffer) return null;
-    return [p.audioId, p.trimStart || 0, p.trimEnd || 0, p.alignment?.enabled ? p.alignment.shift : 0, p.alignment?.manual || 0, bpm, beats, p.bars].join(":");
+    return [p.audioId, p.trimStart || 0, p.trimEnd || 0, p.alignment?.enabled ? p.alignment.shift : 0, p.alignment?.manual || 0, bpm, beats, p.bars,this.sampleVersions.get(p.audioId)||0].join(":");
   }
   async preparePad(id, bpm = this.session.bpm, beats = this.session.beats) {
     const original = this.sampleBuffer(id);
@@ -170,7 +202,6 @@ class AudioEngine extends EventTarget {
       const buffer = this.ctx.createBuffer(rendered.length, targetLength, original.sampleRate);
       rendered.forEach((c, i) => buffer.copyToChannel(c, i));
       this.stretchedBuffers.set(key, buffer);
-      if (this.stretchedBuffers.size > 16) this.stretchedBuffers.delete(this.stretchedBuffers.keys().next().value);
       return buffer;
     })();
     this.stretchTasks.set(key, task);
@@ -295,6 +326,7 @@ class AudioEngine extends EventTarget {
     const total = p.bars * this.session.beats * beatDuration(this.session.bpm), length = total - phaseBeats * beatDuration(this.session.bpm);
     if (length < 0.012) return;
     const source = this.ctx.createBufferSource();
+    source.loopVoice=true;
     source.buffer = buffer;
     source.playbackRate.value = 1;
     const gain = this.ctx.createGain();
@@ -351,6 +383,7 @@ class AudioEngine extends EventTarget {
       feedback.connect(delay);
       nodes.push(delay, wet, feedback);
     }
+    if(settings.reverb)nodes.push(...createReverb(c,gain,this.master,settings.reverb,settings.reverbSpace).nodes);
     const clean = () => {
       try {
         source.stop();
@@ -362,7 +395,7 @@ class AudioEngine extends EventTarget {
     };
     this.previewCleanup = clean;
     this.track(source, null, "preview");
-    source.addEventListener("ended", () => setTimeout(clean, settings.echo ? Math.min(4e3, (settings.echoTime || 0.25) * 8e3) : 0));
+    source.addEventListener("ended", () => setTimeout(clean, Math.max(settings.reverb?3000:0,settings.echo ? Math.min(4e3, (settings.echoTime || 0.25) * 8e3) : 0)));
     source.start(c.currentTime + 5e-3 + (settings.preDelay || 0) / 1e3);
   }
   track(source, gain, id) {
@@ -373,6 +406,7 @@ class AudioEngine extends EventTarget {
       gain?.disconnect();
       this.nodes.delete(source);
     };
+    while(this.nodes.size>this.maxSources){const oldest=[...this.nodes].find(n=>n!==source&&!n.loopVoice);if(!oldest)break;try{oldest.stop();}catch{}this.nodes.delete(oldest);}
   }
   play(e, time = this.ctx.currentTime + 3e-3, level = 1, id = null) {
     const c = this.ctx, t = Math.max(time, c.currentTime), v = Math.max(1e-3, (e.velocity ?? 0.7) * (id === null ? level : 1)), voice = e.voice;
@@ -473,7 +507,6 @@ class AudioEngine extends EventTarget {
       buffer = c.createBuffer(1, samples.length, c.sampleRate);
       buffer.copyToChannel(samples, 0);
       this.stringBuffers.set(key, buffer);
-      if (this.stringBuffers.size > 48) this.stringBuffers.delete(this.stringBuffers.keys().next().value);
     }
     const source = c.createBufferSource(), filter = c.createBiquadFilter(), body = c.createBiquadFilter(), gain = c.createGain();
     source.buffer = buffer;
@@ -546,6 +579,7 @@ class AudioEngine extends EventTarget {
         depth.connect(n.frequency);
         mod.start(t);
         mod.stop(t + life);
+        this.track(mod, depth, id);
         n.addEventListener("ended", () => {
           mod.disconnect();
           depth.disconnect();
@@ -590,8 +624,10 @@ class AudioEngine extends EventTarget {
   async decode(id, array) {
     await this.init();
     const b = await this.ctx.decodeAudioData(array.slice(0));
+    this.sampleVersions.set(id,(this.sampleVersions.get(id)||0)+1);
     this.buffers.set(id, b);
     this.processedBuffers.clear();
+    for(const key of this.stretchedBuffers.keys())if(String(key).startsWith(id+':'))this.stretchedBuffers.delete(key);
     return b;
   }
   async openMic() {
@@ -621,8 +657,9 @@ class AudioEngine extends EventTarget {
   async beginMic(start, end, onChunk = null) {
     const mic = await this.openMic();
     const chunks = [];
-    let finish;
+    let finish, stopPromise, stopTimer, closed=false;
     const done = new Promise((resolve) => finish = resolve);
+    const close=()=>{if(closed)return;closed=true;clearTimeout(stopTimer);mic.node.port.onmessage=null;try{mic.close();}finally{finish();}};
     mic.node.port.onmessage = ({ data }) => {
       if (data.type === "samples") {
         chunks.push(data);
@@ -631,10 +668,17 @@ class AudioEngine extends EventTarget {
       if (data.type === "stopped") finish();
     };
     mic.node.port.postMessage({ type: "start" });
-    return { ...mic, chunks, start, end, stop: async () => {
-      mic.node.port.postMessage({ type: "stop" });
-      await done;
-      mic.close();
+    return { ...mic, close, chunks, start, end, stop: () => {
+      if(!stopPromise)stopPromise=(async()=>{
+        if(closed)return;
+        try{
+          // An interrupted context may never acknowledge the worklet's final flush.
+          stopTimer=setTimeout(finish,1200);
+          mic.node.port.postMessage({type:'stop'});
+          await done;
+        }finally{close();}
+      })();
+      return stopPromise;
     } };
   }
   micBuffer(recording, start, end) {

@@ -23,7 +23,8 @@ const soundBank = {
     { id: "acid", name: "Acid pulse", description: "Square oscillator · resonant sweep", wave: "square", cutoff: 1700, detune: 2, resonance: 7 },
     { id: "glass", name: "Glass pluck", description: "FM bell · crisp and weightless", wave: "sine", cutoff: 7e3, detune: 3, fm: 2.7 },
     { id: "cloud", name: "Cloud pad", description: "Slow bloom · wide, soft harmonics", wave: "triangle", cutoff: 3600, detune: 18, attack: 0.18 },
-    { id: "chip", name: "Pocket chip", description: "Square lead · playful and bright", wave: "square", cutoff: 6800, detune: 0 }
+    { id: "chip", name: "Pocket chip", description: "Square lead · playful and bright", wave: "square", cutoff: 6800, detune: 0 },
+    {id:'pure',name:'Pure tone',description:'Clean sine melody · no modulation',wave:'sine',cutoff:5000,detune:0}
   ],
   kick: [
     { id: "808", name: "808 sub", start: 125, end: 42, decay: 0.65, click: 0.05 },

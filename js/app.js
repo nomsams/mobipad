@@ -1,4 +1,7 @@
-import { analyzeBuffer } from "./dsp-client.js";
+import { analyzeBuffer, setDSPResourceMode } from "./dsp-client.js";
+import {Presentation} from './presentation.js';
+import {resourceProfiles} from './device.js';
+import {AutoSynth} from './auto-synth.js';
 import { bindStepEditing } from "./sequence-input.js";
 import { AudioEngine } from "./engine.js";
 import { defaultSession, validateSession, makePads, packs, padKeys, drums, drumNames, pattern, resizePattern, colors } from "./presets.js";
@@ -11,12 +14,35 @@ import { analyzeRecording, trimSilence, planRecording, validSampleSettings } fro
 const $ = (s) => document.querySelector(s), $$ = (s) => [...document.querySelectorAll(s)];
 let seqErase = false;
 let tempoTimer = null, tempoPreparing = false;
+let operationVersion=0, startingRecording=null;
 let session = defaultSession(), samples = [], view = "pads", mode = "loop", instrument = "piano", octave = 4, selected = 12, saveTimer, toastTimer, restoring = false, recording = null, mixRecorder = null, wakeLock = null, writing = false;
 const audio = new AudioEngine(session), jam = new JamRoom();
 const rack = new InstrumentRack({ audio, getSession: () => session, ready, perform: performNote, changed, notify: toast, onVoice: (v) => instrument = v, changeSound: (voice, id) => sendAction({ type: "sound", voice, id }), changeKit: (id) => sendAction({ type: "kit", id }), startTransport: () => {
   if (jam.role === "follower") throw new Error("The leader needs to start the transport for the arpeggiator.");
   sendAction({ type: "start", epoch: audio.now() + 180 });
 } });
+const presentation = new Presentation({onResources:mode=>{audio.setResourceMode(mode);setDSPResourceMode(mode);},onStudio:()=>{if(view==='mixer')switchView('pads');},notify:toast});
+const autoSynth=new AutoSynth({audio,getSession:()=>session,ready,notify:toast,commit:async({source,events,config,replace})=>{
+  const original=session.pads[source.id],id=replace?source.id:emptyPad();
+  const pad={...session.pads[id],kind:'loop',name:(original.name+' · synth').slice(0,80),audioId:null,events,bars:original.bars,volume:.75,trimStart:undefined,trimEnd:undefined,alignment:undefined,trackAnalysis:undefined,sequenceEnabled:false,steps:[],preDelay:0,reverb:config.reverb,reverbSpace:config.reverbSpace,echo:config.echo,echoTime:config.echoTime};
+  sendAction({type:'setpad',pad});selected=id;renderQuickPad();
+  if(audio.running){const beat=source.startBeat!==null&&source.startBeat>=audio.position()-120?source.startBeat:nextBoundary(audio.position(),session.beats);sendAction({type:'pad',id,beat,on:true,catchUp:true});}
+  switchView('pads');
+}});
+const sampleLoads = new Map();
+async function ensureSample(id) {
+  if (!id || audio.buffers.has(id)) return;
+  if (!sampleLoads.has(id)) {
+    const sample = samples.find(s=>s.id===id);
+    if (!sample) return; // A shared sample may still be arriving over the room connection.
+    sampleLoads.set(id, sample.blob.arrayBuffer().then(data=>audio.decode(id,data)).finally(()=>sampleLoads.delete(id)));
+  }
+  await sampleLoads.get(id);
+}
+async function prepareSamples(id) {
+  const ids=new Set([...session.pads.filter(p=>audio.active.has(p.id)||audio.pending.get(p.id)?.on||session.seqEnabled&&p.sequenceEnabled).map(p=>p.audioId),id]);
+  for(const sampleId of ids)await ensureSample(sampleId);
+}
 const palette = { coral: "#eea08b", lime: "#caee91", teal: "#88c8be", purple: "#b3a1d6" };
 function toast(message, error = false) {
   $("#toast").textContent = message;
@@ -52,19 +78,20 @@ function changed() {
     }
   }, 350);
 }
-async function ready() {
+async function ready(sampleId) {
   await audio.init();
-  for (const s of samples) if (!audio.buffers.has(s.id)) await audio.decode(s.id, await s.blob.arrayBuffer());
+  await prepareSamples(sampleId);
   $("#audio-status").textContent = `Audio ready · ${Math.round((audio.ctx.outputLatency || audio.ctx.baseLatency || 0) * 1e3)} ms output`;
   $("#latency-info").textContent = `Sample rate: ${audio.ctx.sampleRate.toLocaleString()} Hz. Base latency: ${Math.round((audio.ctx.baseLatency || 0) * 1e3)} ms. Output estimate: ${Math.round((audio.ctx.outputLatency || 0) * 1e3)} ms. Hardware and Bluetooth can add more delay.`;
 }
 function switchView(name) {
   if (view === "instruments" && name !== view) rack.releaseAll();
   view = name;
+  document.body.dataset.view=name;
   $$(".view").forEach((e) => e.hidden = e.id !== "view-" + name);
-  $$("[data-view]").forEach((e) => e.classList.toggle("active", e.dataset.view === name));
+  $$(".view-tabs [data-view]").forEach((e) => e.classList.toggle("active", e.dataset.view === name));
 }
-$$("[data-view]").forEach((e) => e.onclick = () => switchView(e.dataset.view));
+$$(".view-tabs [data-view]").forEach((e) => e.onclick = () => switchView(e.dataset.view));
 function make(tag, cls, text) {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
@@ -248,7 +275,7 @@ function renderLibrary() {
   for (const s of samples) {
     const row = make("div", "sample-item"), name = make("span", "", s.name), info = make("small", "", s.duration.toFixed(1) + " s"), assign = make("button", "", "Add to pad"), del = make("button", "", "×");
     assign.onclick = attempt(async () => {
-      await ready();
+      await ready(s.id);
       selected = emptyPad();
       await assignSample(s, selected);
       toast("Added to pad " + (selected + 1));
@@ -326,7 +353,7 @@ async function openTempoSuggestion(audioId) {
   if (jam.role === "follower") throw new Error("The room leader controls the session tempo.");
   const sample = samples.find((s) => s.id === audioId);
   if (!sample) throw new Error("No sample selected.");
-  await ready();
+  await ready(audioId);
   if (!sample.analysis) {
     toast("Analyzing BPM and key…");
     sample.analysis = await analyzeBuffer(audio.buffers.get(audioId));
@@ -356,21 +383,29 @@ function openSampleEditor(p) {
   const buffer = audio.buffers.get(p.audioId);
   $("#sample-editor").hidden = !p.audioId;
   renderDetection(p);
+  $('#sample-echo').value=(p.echo||0)*100;$('#sample-echo-time').value=(p.echoTime||.25)*1000;$('#sample-reverb').value=(p.reverb||0)*100;$('#sample-space').value=p.reverbSpace||'room';
   if (!p.audioId) return;
   $("#sample-trim-start").value = (p.trimStart || 0).toFixed(3);
   $("#sample-trim-end").value = (p.trimEnd || buffer?.duration || 0).toFixed(3);
   $("#sample-predelay").value = p.preDelay || 0;
   $("#sample-echo").value = (p.echo || 0) * 100;
   $("#sample-echo-time").value = (p.echoTime || 0.25) * 1e3;
+  $('#sample-reverb').value=(p.reverb||0)*100;
+  $('#sample-space').value=p.reverbSpace||'room';
   $("#sample-nudge").value = p.alignment?.manual || 0;
   $("#sample-smart-align").checked = Boolean(p.alignment?.enabled);
   const a = p.alignment;
   $("#alignment-report").textContent = a?.onsets?.length ? `${a.onsets.length} attacks detected · ${Math.round(a.confidence * 100)}% grid consistency. ${a.shift ? `${a.shift > 0 ? "Advance" : "Delay"} ${Math.abs(a.shift)} ms to align.` : a.reason || "No automatic shift needed."} Positive manual nudge delays playback.` : "No timing analysis for this sound. Manual nudge shifts the loop; positive values play later.";
   drawSampleWaveform();
 }
+function readPadEffects(){
+  const effects={echo:Number($('#sample-echo').value)/100,echoTime:Number($('#sample-echo-time').value)/1000,reverb:Number($('#sample-reverb').value)/100,reverbSpace:$('#sample-space').value};
+  if(!validSampleSettings(effects))throw new Error('Choose effect settings within the displayed limits.');return effects;
+}
 function readSampleEditor() {
   const p = session.pads[selected], buffer = audio.buffers.get(p.audioId), end = Number($("#sample-trim-end").value);
   const edit = { trimStart: Number($("#sample-trim-start").value), trimEnd: end, preDelay: Number($("#sample-predelay").value), echo: Number($("#sample-echo").value) / 100, echoTime: Number($("#sample-echo-time").value) / 1e3, alignment: { ...p.alignment || { shift: 0, confidence: 0 }, enabled: $("#sample-smart-align").checked, manual: Number($("#sample-nudge").value) } };
+  edit.reverb=Number($('#sample-reverb').value)/100;edit.reverbSpace=$('#sample-space').value;
   if (!validSampleSettings(edit) || !buffer || end > buffer.duration + 2e-3 || end - edit.trimStart < 0.015) throw new Error("Choose a valid audio region of at least 15 ms and timing values within the displayed limits.");
   return edit;
 }
@@ -421,8 +456,11 @@ bind("#sample-autotrim", "click", () => {
   drawSampleWaveform();
 });
 bind("#sample-preview", "click", async () => {
-  await ready();
+  await ready(session.pads[selected].audioId);
   audio.previewSample(selected, readSampleEditor());
+});
+bind('#sample-autosynth','click',async()=>{
+  const id=selected,pad={...session.pads[id],...readSampleEditor()};sendAction({type:'setpad',pad});$('#pad-dialog').close();await autoSynth.open(id);
 });
 function renderSampleSequencer() {
   const container = $("#sample-sequencer");
@@ -437,7 +475,7 @@ function renderSampleSequencer() {
     check.type = "checkbox";
     check.checked = Boolean(p.sequenceEnabled);
     check.setAttribute("aria-label", p.name + " sequencer enabled");
-    check.onchange = () => sendAction({ type: "sampleseq", id: p.id, on: check.checked });
+    check.onchange = attempt(async () => {await ready(p.audioId);sendAction({ type: "sampleseq", id: p.id, on: check.checked });});
     label.append(check, document.createTextNode(p.name));
     const edit = make("button", "text-button", "Edit / trim / delay");
     edit.onclick = () => openPad(p.id);
@@ -462,9 +500,10 @@ async function openPad(id) {
   selected = id;
   renderQuickPad();
   const p = session.pads[id];
+  audio.editingSample=p.audioId;
   if (p.audioId) {
     try {
-      await ready();
+      await ready(p.audioId);
     } catch (error) {
       toast(error.message, true);
       return;
@@ -477,9 +516,12 @@ async function openPad(id) {
   openSampleEditor(p);
   $("#pad-dialog").showModal();
 }
+$('#pad-dialog').addEventListener('close',()=>{audio.editingSample=null;});
 async function triggerPad(id) {
-  await ready();
+  const version=operationVersion;
+  await ready(session.pads[id].audioId);
   if (session.pads[id].audioId && mode !== "shot") await audio.preparePad(id);
+  if(version!==operationVersion)return;
   const p = session.pads[id];
   if (p.kind === "empty") return;
   if (mode === "shot" || p.kind === "shot") {
@@ -643,6 +685,7 @@ function applyAction(a) {
     case "pattern":
       session.seqEnabled = a.enabled;
       session.swing = a.swing;
+      prepareSamples().catch(e=>toast(e.message,true));
       renderTiming();
       break;
     case "padlevel":
@@ -655,24 +698,28 @@ function applyAction(a) {
       p.steps = Array.from({ length: session.beats * 4 }, (_, i) => p.steps?.[i] || false);
       p.steps[a.index] = a.on;
       p.sequenceEnabled = true;
+      ensureSample(p.audioId).catch(e=>toast(e.message,true));
       renderSampleSequencer();
       break;
     }
     case "sampleseq":
       session.pads[a.id].sequenceEnabled = a.on;
+      if(a.on)ensureSample(session.pads[a.id].audioId).catch(e=>toast(e.message,true));
       session.pads[a.id].steps ??= Array.from({ length: session.beats * 4 }, (_, i) => i === 0);
       renderSampleSequencer();
       break;
-    case "setpad":
-      audio.cancelPad(a.pad.id);
-      audio.active.delete(a.pad.id);
-      audio.pending.delete(a.pad.id);
+    case "setpad": {
+      const previous=session.pads[a.pad.id],duration=audio.buffers.get(previous.audioId)?.duration||0;
+      const shift=p=>(p.alignment?.enabled?p.alignment.shift:0)-(p.alignment?.manual||0);
+      const sameContent=a.pad.kind!=='empty'&&previous.kind===a.pad.kind&&previous.audioId===a.pad.audioId&&previous.bars===a.pad.bars&&(previous.trimStart||0)===(a.pad.trimStart||0)&&(previous.trimEnd||duration)===(a.pad.trimEnd||duration)&&(previous.preDelay||0)===(a.pad.preDelay||0)&&shift(previous)===shift(a.pad)&&JSON.stringify(previous.events)===JSON.stringify(a.pad.events);
+      if(!sameContent){audio.cancelPad(a.pad.id);audio.active.delete(a.pad.id);audio.pending.delete(a.pad.id);}
       session.pads[a.pad.id] = structuredClone(a.pad);
       audio.setPadVolume(a.pad.id, a.pad.volume);
       audio.setPadEffects(a.pad.id);
       renderSampleSequencer();
       renderPads();
       break;
+    }
   }
   changed();
 }
@@ -724,17 +771,19 @@ bind("#stop-loops", "click", () => {
   sendAction({ type: "stoploops" });
 });
 async function changeTiming() {
-  if (recording) throw new Error("Finish recording before changing timing.");
+  if (recording||startingRecording||writing) throw new Error("Finish recording before changing timing.");
   if (tempoPreparing) throw new Error("Preparing the previous tempo change.");
   const bpm = clamp($("#bpm").value, 40, 240), beats = Number($("#beats").value), bars = Number($("#bars").value);
   tempoPreparing = true;
+  const version=operationVersion;
   try {
     await ready();
     await audio.prepareTempo(bpm, beats);
+    if(version!==operationVersion)return;
     const switchAt = audio.now() + 220, phase = audio.running ? Math.max(0, audio.position() + 0.22 / beatDuration(session.bpm)) : 0;
     sendAction({ type: "timing", bpm, beats, bars, switchAt, epoch: switchAt - phase * beatDuration(bpm) * 1e3 });
   } finally {
-    tempoPreparing = false;
+    if(version===operationVersion)tempoPreparing = false;
   }
 }
 for (const id of ["#bpm", "#beats", "#bars"]) bind(id, "change", changeTiming);
@@ -800,7 +849,7 @@ bind("#seq-to-pad", "click", () => {
   toast("Pattern saved to pad " + (id + 1));
 });
 bind("#pad-done", "click", () => {
-  const p = { ...session.pads[selected], ...session.pads[selected].audioId ? readSampleEditor() : {}, name: $("#pad-name").value.trim() || session.pads[selected].name, volume: Number($("#pad-level").value) / 100, bars: Number($("#pad-bars").value) };
+  const p = { ...session.pads[selected], ...readPadEffects(), ...session.pads[selected].audioId ? readSampleEditor() : {}, name: $("#pad-name").value.trim() || session.pads[selected].name, volume: Number($("#pad-level").value) / 100, bars: Number($("#pad-bars").value) };
   sendAction({ type: "setpad", pad: p });
   $("#pad-dialog").close();
 });
@@ -870,9 +919,13 @@ bind("#audio-file", "change", async () => {
     toast(`${count} ${count === 1 ? "sound" : "sounds"} added. Ready to play.`);
   }
 });
-async function beginRecording(kind, target = null) {
+async function beginRecording(kind, target = null, asSynth = $('#recording-mode').value==='autosynth') {
+  if(startingRecording||writing)throw new Error('A take is already being prepared. Please wait.');
   if (tempoPreparing || tempoTimer) throw new Error("Wait for the tempo change before recording.");
+  const token={},version=operationVersion;startingRecording=token;
+  try{
   await ready();
+  if(version!==operationVersion)return;
   if (recording) {
     await finishRecording();
     return;
@@ -884,17 +937,19 @@ async function beginRecording(kind, target = null) {
   }
   let mic = null;
   if (kind === "mic") mic = await audio.beginMic(0, 0);
+  if(version!==operationVersion){mic?.close();return;}
   const countIn = $("#record-countin").value === "bar" ? session.beats : Number($("#record-countin").value);
   const { startBeat } = planRecording(audio.position(), session.bpm, session.beats, session.bars, countIn);
   const start = audio.epoch + startBeat * beatDuration(session.bpm) * 1e3;
   const end = start + session.beats * session.bars * beatDuration(session.bpm) * 1e3;
-  recording = { kind, id, startBeat, start, end, events: [], mic, countIn: countIn > 0, bars: session.bars, beats: session.beats, startAudio: audio.ctx.currentTime + (start - audio.now()) / 1e3 };
+  recording = { kind, id, startBeat, start, end, events: [], mic, autoSynth:kind==='mic'&&asSynth, countIn: countIn > 0, bars: session.bars, beats: session.beats, startAudio: audio.ctx.currentTime + (start - audio.now()) / 1e3 };
   audio.capture = recording;
   $("#capture-btn").classList.add("recording");
   $("#mic-btn").classList.toggle("recording", kind === "mic");
   $("#capture-btn").innerHTML = '<span class="record-dot"></span> Cancel take';
   $("#mic-btn").innerHTML = '<span class="record-dot"></span> Cancel';
   toast(countIn ? "Count in… then your loop starts on the beat." : "Armed. Recording begins on the next beat.");
+  }finally{if(startingRecording===token)startingRecording=null;}
 }
 async function cancelRecording() {
   if (!recording) return;
@@ -918,6 +973,7 @@ async function finishRecording() {
   if (!recording || writing) return;
   writing = true;
   const r = recording;
+  const recordedSession=session,recordedPad=session.pads[r.id];
   recording = null;
   audio.capture = null;
   try {
@@ -934,9 +990,11 @@ async function finishRecording() {
       toast("No notes in that take. Give it another go.");
       return;
     }
+    if(session!==recordedSession||session.pads[r.id]!==recordedPad)return;
     sendAction({ type: "setpad", pad });
     selected = r.id;
     renderQuickPad();
+    if(r.autoSynth){await autoSynth.open(r.id,{automatic:true,startBeat:r.startBeat});return;}
     if (audio.running) sendAction({ type: "pad", id: r.id, beat: r.startBeat + r.beats * r.bars, catchUp: true, on: true });
     toast(pad.alignment?.enabled && pad.alignment.shift ? `Loop captured · timing corrected by ${Math.abs(pad.alignment.shift)} ms.` : "Loop captured. Already in time.");
   } finally {
@@ -946,6 +1004,7 @@ async function finishRecording() {
 }
 bind("#capture-btn", "click", () => recording ? cancelRecording() : beginRecording("notes"));
 bind("#mic-btn", "click", () => recording ? cancelRecording() : beginRecording("mic"));
+bind('#autosynth-record','click',()=>recording?cancelRecording():beginRecording('mic',null,true));
 bind("#pad-mic", "click", () => {
   $("#pad-dialog").close();
   return beginRecording("mic", selected);
@@ -953,7 +1012,19 @@ bind("#pad-mic", "click", () => {
 audio.addEventListener("captureend", attempt(finishRecording));
 audio.addEventListener("pads", renderPadStates);
 audio.addEventListener("audioerror", ({ detail }) => toast(detail, true));
-audio.addEventListener("transport", () => {
+audio.addEventListener('audiostate',()=>{
+  const paused=audio.running&&audio.ctx.state!=='running';
+  $('#resume-audio').hidden=!paused;
+  if(paused&&(recording||startingRecording)){
+    startingRecording=null;operationVersion++;
+    attempt(cancelRecording)();
+    toast('Audio was interrupted. The take was cancelled; tap Resume audio to continue.',true);
+  }
+});
+bind('#resume-audio','click',async()=>{await ready();$('#resume-audio').hidden=audio.ctx.state==='running';});
+audio.addEventListener("transport", ({detail}) => {
+  if(!audio.running&&detail?.cleared){operationVersion++;startingRecording=null;clearTimeout(tempoTimer);tempoTimer=null;tempoPreparing=false;renderTiming();}
+  $('#resume-audio').hidden=!audio.running||audio.ctx?.state==='running';
   const b = $("#play-btn");
   b.classList.toggle("playing", audio.running);
   b.firstChild.textContent = audio.running ? "Ⅱ" : "▶";
@@ -1022,7 +1093,7 @@ bind("#project-new", "click", async () => {
 bind("#export-mix", "click", async () => {
   await ready();
   if (mixRecorder) {
-    mixRecorder.stop();
+    if(mixRecorder.state!=='inactive')mixRecorder.stop();
     return;
   }
   if (!window.MediaRecorder) throw new Error("Mix recording is unavailable in this browser. Export your project instead.");
@@ -1036,10 +1107,12 @@ bind("#export-mix", "click", async () => {
     download(new Blob(chunks, { type }), session.name + "-mix." + (type.includes("mp4") ? "m4a" : "webm"), type);
     mixRecorder = null;
     $("#export-mix").textContent = "◉ Record mix";
+    $('#stage-record-mix').textContent='Record mix';
     toast("Mix downloaded.");
   };
   mixRecorder.start(1e3);
   $("#export-mix").textContent = "■ Finish mix";
+  $('#stage-record-mix').textContent='Finish mix & download';
   toast("Recording the mix. Tap Finish mix to download.");
 });
 document.addEventListener("keydown", attempt(async (e) => {
@@ -1064,28 +1137,40 @@ document.addEventListener("keydown", attempt(async (e) => {
   if (id >= 0 && session.pads[id].kind !== "empty") await triggerPad(id);
 }));
 document.addEventListener("keyup", (e) => rack.keyUp(e));
+let drawTimer, lastQuarter = '', lastBeat = -1;
 function tick() {
-  if (audio.running) {
-    const p = Math.max(0, audio.position());
-    const beat = Math.floor(p) % session.beats;
-    $("#position").innerHTML = `${Math.floor(p / session.beats) + 1} <span>. ${beat + 1} . ${Math.floor(p * 4) % 4 + 1}</span>`;
-    $$("#beat-lights i").forEach((e, i) => e.classList.toggle("on", i === beat));
-    for (const b of $$(".pad.is-playing")) {
-      const a = audio.active.get(Number(b.dataset.id)), pad = session.pads[Number(b.dataset.id)];
-      if (a) b.style.setProperty("--progress", (p - a.start) % (pad.bars * session.beats) / (pad.bars * session.beats) * 100 + "%");
+  clearTimeout(drawTimer);
+  if (!document.hidden) {
+    if (audio.running) {
+      const p = Math.max(0, audio.position()), beat = Math.floor(p) % session.beats;
+      const quarter = Math.floor(p * 4), stamp = session.beats + ':' + quarter;
+      if (stamp !== lastQuarter) {
+        lastQuarter = stamp;
+        $('#position').innerHTML = Math.floor(p / session.beats) + 1 + ' <span>. ' + (beat + 1) + ' . ' + (quarter % 4 + 1) + '</span>';
+        if (view === 'sequencer') $$('.seq-step').forEach(e=>e.classList.toggle('current', Number(e.dataset.step)===quarter%(session.beats*4)));
+      }
+      if (beat !== lastBeat) {lastBeat=beat; $$('#beat-lights i').forEach((e,i)=>e.classList.toggle('on', i===beat));}
+      if (view === 'pads') for (const b of $$('.pad.is-playing')) {
+        const id=Number(b.dataset.id),a=audio.active.get(id),pad=session.pads[id];
+        if(a)b.style.setProperty('--progress',(p-a.start)%(pad.bars*session.beats)/(pad.bars*session.beats)*100+'%');
+      }
+    } else {lastQuarter='';lastBeat=-1;}
+    $('#stage-recording-status').hidden=!recording&&!mixRecorder;
+    if(mixRecorder&&!recording)$('#stage-recording-status').textContent='Mix recording · finish in Settings';
+    if (recording) {
+      const now=audio.now(),left=Math.max(0,(recording.end-now)/1000),count=Math.max(0,Math.ceil((recording.start-now)/1000/beatDuration(session.bpm)));
+      const status=now<recording.start?'Count in · '+count:'Recording · '+left.toFixed(1)+'s left';
+      $('#capture-title').textContent=status;
+      $('#capture-hint').textContent=now<recording.start?'Get ready. Your first beat is coming.':'Keep playing. We’ll close the loop for you.';
+      $('#mic-status').textContent=status;
+      $('#stage-recording-status').textContent=status;
     }
-    if (view === "sequencer") $$(".seq-step").forEach((e) => e.classList.toggle("current", Number(e.dataset.step) === Math.floor(p * 4) % (session.beats * 4)));
   }
-  if (recording) {
-    const now = audio.now(), left = Math.max(0, (recording.end - now) / 1e3), count = Math.max(0, Math.ceil((recording.start - now) / 1e3 / beatDuration(session.bpm)));
-    const status = now < recording.start ? "Count in · " + count : "Recording · " + left.toFixed(1) + "s left";
-    $("#capture-title").textContent = status;
-    $("#capture-hint").textContent = now < recording.start ? "Get ready. Your first beat is coming." : "Keep playing. We’ll close the loop for you.";
-    $("#mic-status").textContent = status;
-  }
-  requestAnimationFrame(tick);
+  drawTimer=setTimeout(tick, document.hidden?1000:1000/resourceProfiles[audio.resourceMode].fps);
 }
+document.addEventListener('visibilitychange',tick);
 const audioImports = /* @__PURE__ */ new Map();
+function actionSample(a){return a?.pad?.audioId||(['pad','shot','samplestep','sampleseq'].includes(a?.type)?session.pads[a.id]?.audioId:null);}
 let incomingCommands = Promise.resolve();
 function leaderCommand({ packet, remote, conn }) {
   if (!validateAction(packet.action, remote)) {
@@ -1096,8 +1181,8 @@ function leaderCommand({ packet, remote, conn }) {
     applyAction(packet.action);
     if (jam.role === "leader") jam.accept(packet);
   };
-  const pending = audioImports.get(packet.action.pad?.audioId);
-  if (pending) pending.then(perform).catch((e) => toast(e.message, true));
+  const id=actionSample(packet.action),pending=audioImports.get(id);
+  if (pending||id&&!audio.buffers.has(id)) Promise.resolve(pending).then(()=>ensureSample(id)).then(perform).catch((e) => toast(e.message, true));
   else perform();
 }
 jam.addEventListener("command", ({ detail }) => {
@@ -1113,6 +1198,7 @@ jam.addEventListener("accepted", ({ detail }) => {
     if (detail.action?.type === "timing") await audio.prepareTempo(detail.action.bpm, detail.action.beats);
     const pending = audioImports.get(detail.action?.pad?.audioId);
     if (pending) await pending;
+    await prepareSamples(actionSample(detail.action));
     if (["timing", "stop", "pack"].includes(detail.action?.type)) await cancelRecording();
     applyAction(detail.action);
   }).catch((e) => toast(e.message, true));
@@ -1134,6 +1220,7 @@ jam.addEventListener("snapshot", attempt(async ({ detail: s }) => {
   audio.stop();
   const entries = Array.isArray(s.active) ? s.active : [];
   audio.active = new Map(entries.filter((x) => Array.isArray(x) && Number.isInteger(x[0]) && x[0] >= 0 && x[0] < 16 && Number.isFinite(x[1]?.start)));
+  await prepareSamples();
   if (s.running && Number.isFinite(s.epoch)) audio.start(s.epoch);
   if (Array.isArray(s.pending)) {
     for (const [id, p] of s.pending) if (Number.isInteger(id) && id >= 0 && id < 16 && Number.isFinite(p?.beat) && typeof p.on === "boolean") audio.pending.set(id, p);

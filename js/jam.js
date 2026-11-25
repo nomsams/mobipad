@@ -16,15 +16,15 @@ class JamRoom extends EventTarget {
     this.syncTimer = setInterval(() => this.maintain(), 2e3);
     this.seen = /* @__PURE__ */ new Set();
     this.name = "Phone " + randomCode().slice(0, 3);
-    this.device = sessionStorage.getItem("mobipad-device") || crypto.randomUUID();
-    sessionStorage.setItem("mobipad-device", this.device);
+    this.device = crypto.randomUUID();
+    try{this.device=sessionStorage.getItem('mobipad-device')||this.device;sessionStorage.setItem('mobipad-device',this.device);}catch{}
     this.config = {};
   }
   emit(type, detail) {
     this.dispatchEvent(new CustomEvent(type, { detail }));
   }
   remember() {
-    localStorage.setItem("mobipad-room", JSON.stringify({ room: this.room, role: this.role }));
+    try{localStorage.setItem("mobipad-room", JSON.stringify({ room: this.room, role: this.role }));}catch{}
   }
   async create(role = "leader", room = null) {
     if (!globalThis.Peer) throw new Error("The connection library could not load. Refresh online and try again.");
@@ -46,10 +46,15 @@ class JamRoom extends EventTarget {
     }
     const id = role === "leader" ? "mobipad-" + this.room : void 0;
     this.peer = new Peer(id, options);
+    const peer=this.peer;
     this.emit("status", { message: "Connecting to signaling…" });
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("Signaling took too long. Check internet or connection settings.")), 18e3);
+      let opened=false;
+      const fail=message=>{clearTimeout(timer);if(!opened&&this.peer===peer)this.leave(false);reject(new Error(message));};
+      const timer = setTimeout(() => fail("Signaling took too long. Check internet or connection settings."), 18e3);
       this.peer.on("open", () => {
+        if(this.peer!==peer)return;
+        opened=true;
         clearTimeout(timer);
         this.retry = 0;
         if (role === "follower") this.connectHost();
@@ -58,17 +63,19 @@ class JamRoom extends EventTarget {
         resolve(this.room);
       });
       this.peer.on("connection", (conn) => {
-        if (this.role === "leader") this.wire(conn);
+        if (this.peer===peer&&this.role === "leader") this.wire(conn);
         else conn.close();
       });
       this.peer.on("disconnected", () => {
+        if(this.peer!==peer)return;
         this.emit("status", { message: "Signaling disconnected. Trying to reconnect…" });
       });
       this.peer.on("error", (err) => {
+        if(this.peer!==peer)return;
         clearTimeout(timer);
         const message = err.type === "unavailable-id" ? "This room already has a leader. Join it as a follower." : err.type === "peer-unavailable" ? "Leader is offline. Retrying automatically…" : err.message;
         this.emit("status", { message, error: true });
-        reject(new Error(message));
+        if(!opened)fail(message);
       });
     });
   }
@@ -84,7 +91,9 @@ class JamRoom extends EventTarget {
     }, 8e3);
   }
   wire(conn) {
+    const peer=this.peer;
     conn.on("open", () => {
+      if(this.peer!==peer||!this.role){conn.close();return;}
       const old = this.connections.get(conn.peer);
       if (old && old !== conn) old.close();
       this.connections.set(conn.peer, conn);
@@ -99,6 +108,7 @@ class JamRoom extends EventTarget {
       }
     });
     conn.on("data", (data) => {
+      if(this.peer!==peer||this.connections.get(conn.peer)!==conn)return;
       conn.lastSeen = Date.now();
       if (this.role === "follower") this.lastHostSeen = Date.now();
       this.receive(data, conn);
@@ -269,7 +279,7 @@ class JamRoom extends EventTarget {
     this.offset = 0;
     this.transfers.clear();
     this.connecting = false;
-    if (forget) localStorage.removeItem("mobipad-room");
+    if (forget)try{localStorage.removeItem("mobipad-room");}catch{}
     this.emitPeers();
   }
 }

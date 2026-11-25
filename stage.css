@@ -1,0 +1,84 @@
+.runtime-control{font-size:12px;padding:7px 10px;min-height:34px}.runtime-control[aria-pressed=true]{color:var(--lime);border-color:#586d42;background:#26301f}.mobile-mixer-tab{display:none}.compact-only{display:none}.display-settings{border-bottom:1px solid var(--line);padding-bottom:15px;margin-bottom:20px}.display-settings h3{font-size:17px}.display-settings .muted{font-size:12px}.compact-timing{display:flex;gap:20px;align-items:center;flex-wrap:wrap}.compact-timing .meter-setting select{font-size:16px;padding:8px 30px 8px 12px;border:1px solid var(--line);background-color:#202421}.compact-timing .tap-btn{height:40px;min-width:50px}.compact-project{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.compact-project #project-btn{max-width:100%;overflow:hidden;text-overflow:ellipsis}.stage-recording-indicator{display:none}
+body[data-layout=compact]{height:var(--app-height,100dvh);overflow:hidden;overscroll-behavior:none}
+body[data-layout=compact] .app-shell{height:100%;max-width:none;padding:env(safe-area-inset-top) max(8px,env(safe-area-inset-right)) calc(56px + env(safe-area-inset-bottom)) max(8px,env(safe-area-inset-left));display:flex;flex-direction:column}
+body[data-layout=compact] .app-header{height:44px;min-height:44px;gap:8px;border:0;flex-shrink:0}
+body[data-layout=compact] .brand{font-size:17px;gap:8px;letter-spacing:.5px}
+body[data-layout=compact] .brand-mark{grid-template-columns:repeat(2,8px);gap:3px}body[data-layout=compact] .brand-mark i{width:8px;height:8px}
+body[data-layout=compact] .brand-tag,body[data-layout=compact] .save-status,body[data-layout=compact] #help-btn,body[data-layout=compact] .session-heading,body[data-layout=compact] footer{display:none}
+body[data-layout=compact] .header-actions{gap:5px;flex-wrap:nowrap}
+body[data-layout=compact] .runtime-control{font-size:11px;padding:6px 8px;min-height:32px}
+body[data-layout=compact] .jam-button{font-size:0;min-height:32px;padding:6px 10px;gap:0}
+body[data-layout=compact] .jam-button:after{content:'Jam';font-size:12px}body[data-layout=compact] .jam-button>span{display:none}
+body[data-layout=compact] main{flex:1;display:flex;flex-direction:column;min-height:0}
+body[data-layout=compact] .transport{flex-shrink:0;flex-wrap:nowrap;min-height:48px;padding:5px 0;gap:5px;margin:0 0 5px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent}
+body[data-layout=compact] .transport-play{flex:1;gap:3px;min-width:0}
+body[data-layout=compact] .play-button{width:36px;height:36px;min-width:36px;font-size:16px}
+body[data-layout=compact] #stop-btn{width:30px;height:36px;font-size:17px}
+body[data-layout=compact] .position{min-width:0;margin-left:3px}
+body[data-layout=compact] .position strong{font-size:14px;letter-spacing:0;white-space:nowrap}
+body[data-layout=compact] .position small{font-size:7px;letter-spacing:.4px}
+body[data-layout=compact] .transport-settings{order:0;width:auto;border:0;padding:0;gap:0;flex-shrink:0}
+body[data-layout=compact] .tempo-setting>span{display:none}
+body[data-layout=compact] .tempo-setting input{width:42px!important;font-size:20px!important}
+body[data-layout=compact] .tempo-setting small{font-size:8px}
+body[data-layout=compact] .tempo-setting>div{gap:0}
+body[data-layout=compact] .transport-end{gap:4px;margin:0}
+body[data-layout=compact] .beat-lights{display:none}
+body[data-layout=compact] .metro{font-size:0;gap:5px;min-height:36px;padding:5px 7px;background:#222a20}
+body[data-layout=compact] .metro>span{font-size:19px}
+body[data-layout=compact] #settings-btn{display:inline-grid;width:32px;height:36px;font-size:20px}
+body[data-layout=compact] .studio-layout{display:block;flex:1;min-height:0;position:relative}
+body[data-layout=compact] .workspace{height:100%;display:flex;flex-direction:column;min-height:0}
+body[data-layout=compact] .view-tabs{position:fixed;z-index:30;left:0;right:0;bottom:0;height:calc(56px + env(safe-area-inset-bottom));padding:4px max(7px,env(safe-area-inset-right)) env(safe-area-inset-bottom) max(7px,env(safe-area-inset-left));margin:0;background:#161c17;border-top:1px solid #364330;border-bottom:0;gap:3px;display:grid;grid-template-columns:repeat(5,minmax(0,1fr))}
+body[data-layout=compact] .view-tabs button{font-size:11px;min-height:44px;padding:3px 1px;border:0;border-radius:6px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:2px;white-space:nowrap}
+body[data-layout=compact] .view-tabs button>span{font-size:19px;margin:0;line-height:20px}
+body[data-layout=compact] .view-tabs button.active{background:#293720;color:var(--lime)}
+body[data-layout=compact] .mobile-mixer-tab{display:flex}
+body[data-layout=compact] .view{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:12px 3px 18px;scrollbar-width:thin}
+body[data-layout=compact] #view-pads{display:flex;flex-direction:column;padding:0;overflow:hidden;gap:6px}
+body[data-layout=compact] #view-pads>.section-bar{flex-shrink:0;min-height:34px;margin:0;gap:7px}
+body[data-layout=compact] .segmented{padding:2px}
+body[data-layout=compact] .segmented button{font-size:11px;padding:6px 9px}
+body[data-layout=compact] .quantize-label,body[data-layout=compact] .quantize-label select{font-size:10px}
+body[data-layout=compact] .pad-columns,body[data-layout=compact] .pad-caption{display:none}
+body[data-layout=compact] .pad-grid{flex:1;min-height:0;grid-template-columns:repeat(4,minmax(0,1fr));grid-template-rows:repeat(4,minmax(0,1fr));gap:6px}
+body[data-layout=compact] .pad{aspect-ratio:auto;min-height:0;padding:clamp(7px,1.5vmin,16px);border-radius:9px}
+body[data-layout=compact] .pad-top{font-size:18px;line-height:1}
+body[data-layout=compact] .pad-name{font-size:clamp(11px,2vmin,18px);line-height:1.25}
+body[data-layout=compact] .pad-bottom{font-size:clamp(9px,1.5vmin,12px);margin-top:5px}
+body[data-layout=compact] .pad-key{display:none}
+body[data-layout=compact] .waveform{top:43%;left:10px;height:22px;max-height:20%;width:70%}
+body[data-layout=compact] .pad.empty .pad-name{font-size:clamp(10px,1.8vmin,15px)}
+body[data-layout=compact] .pad-inspector{display:flex;flex-wrap:nowrap;flex-shrink:0;min-height:48px;padding:2px 0;margin:0;border:0;background:transparent;gap:5px}
+body[data-layout=compact] .pad-inspector>strong,body[data-layout=compact] #quick-sample-bpm{display:none}
+body[data-layout=compact] .pad-inspector>label{font-size:0;flex:1;margin:0;min-width:45px;gap:0}
+body[data-layout=compact] .pad-inspector input{width:100%;min-width:0;margin:0 6px}
+body[data-layout=compact] .pad-inspector button{min-width:40px;width:40px;height:42px;min-height:42px;padding:0;flex:none;font-size:0;gap:0;overflow:hidden}
+body[data-layout=compact] #quick-pad-edit:after{content:'✎';font-size:24px}
+body[data-layout=compact] #quick-pad-clear:after{content:'×';font-size:26px}
+body[data-layout=compact] #quick-upload{font-size:25px}
+body[data-layout=compact] #mic-btn{background:#33251f;border-color:#6d4b3d}
+body[data-layout=compact] #mic-btn .record-dot{width:13px;height:13px;border-width:3px}
+body[data-layout=compact] #mic-btn.recording{background:#6b3027}
+body[data-layout=compact] .record-strip{display:none}
+body[data-layout=compact] .session-panel{display:none}
+body[data-layout=compact][data-view=mixer] .workspace{height:0}
+body[data-layout=compact][data-view=mixer] .session-panel{height:100%;display:flex;flex-direction:column;border:0;margin:0;padding:15px 5px;overflow:auto}
+body[data-layout=compact][data-view=mixer] .mixer{display:grid;grid-template-columns:1fr;max-height:none;overflow:visible}
+body[data-layout=compact][data-view=mixer] .master-control{margin-top:auto;padding-top:22px;flex-shrink:0}
+body[data-layout=compact][data-view=mixer] .session-tip{display:none}
+body[data-layout=compact] .compact-only{display:block}
+body[data-layout=compact] .compact-timing{display:flex}
+body[data-layout=compact] .compact-project{display:flex}
+body[data-layout=compact] .view>.section-bar:first-child h2{font-size:22px}
+body[data-layout=compact] .view>.section-bar:first-child .muted{font-size:12px}
+body[data-layout=compact] .view>.section-bar:first-child .tag{display:none}
+body[data-layout=compact] .view-note{font-size:12px}
+body[data-layout=compact] .stage-recording-indicator{display:block;position:fixed;left:50%;top:max(5px,env(safe-area-inset-top));transform:translateX(-50%);z-index:60;padding:7px 10px;border-radius:6px;background:#9e4d3c;color:#fff1dc;font-size:11px;pointer-events:none}
+body[data-resources=eco] *,body[data-resources=eco] *:before,body[data-resources=eco] *:after{animation:none!important;transition:none!important;backdrop-filter:none!important}
+body[data-resources=eco] .waveform{display:none}
+body[data-resources=eco] .pad{box-shadow:none!important}
+body[data-resources=eco] dialog::backdrop{backdrop-filter:none}
+@media(max-height:560px){body[data-layout=compact] .app-header{height:36px;min-height:36px}body[data-layout=compact] .transport{min-height:42px;margin-bottom:2px}body[data-layout=compact] .position small{display:none}body[data-layout=compact] #view-pads{gap:4px}body[data-layout=compact] .pad-grid{gap:4px}body[data-layout=compact] .pad{padding:6px;border-radius:6px}body[data-layout=compact] .pad-top{font-size:13px}body[data-layout=compact] .pad-name{font-size:11px}body[data-layout=compact] .pad-bottom{font-size:8px;margin-top:2px}body[data-layout=compact] .waveform{display:none}body[data-layout=compact] .pad-inspector{min-height:42px}}
+@media(max-width:700px){body[data-layout=studio] .app-header{height:auto;min-height:73px;flex-wrap:wrap;padding:12px 0}body[data-layout=studio] .header-actions{flex-wrap:wrap;gap:6px}body[data-layout=studio] .brand-tag{display:none}}
+.resume-audio{position:fixed;z-index:80;bottom:calc(68px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);max-width:95%;white-space:nowrap;background:var(--lime);color:#182411;box-shadow:0 3px 20px #0008}

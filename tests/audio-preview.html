@@ -1,21 +1,50 @@
-<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mobipad audio integration checks</title><style>body{background:#111313;color:#caee91;font:16px system-ui;margin:30px}button{background:#caee91;color:#192411;padding:12px 20px;border:0;border-radius:8px;font:inherit}pre{white-space:pre-wrap;line-height:1.8;color:#d4ded0}</style></head><body><h1>Audio integration checks</h1><p>Uses a generated signal. Does not request microphone access.</p><button id="run">Run browser audio checks</button><pre id="results" role="status">Ready.</pre><script type="module">
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mobipad audio integration checks</title><style>body{background:#111313;color:#caee91;font:16px system-ui;margin:30px}button{background:#caee91;color:#192411;padding:12px 20px;border:0;border-radius:8px;font:inherit}pre{white-space:pre-wrap;line-height:1.8;color:#d4ded0}</style></head><body><h1>Audio integration checks</h1><p>Uses a generated signal. Does not request microphone access.</p><label><input type="checkbox" id="eco" checked> Eco resource mode</label><p></p><button id="run">Run browser audio checks</button><pre id="results" role="status">Ready.</pre><script type="module">
 import {AudioEngine} from '../js/engine.js';
 import {defaultSession,drums} from '../js/presets.js';
 import {soundBank} from '../js/sounds.js';
+import {sungFixture} from './melody-fixture.js';
+import {analyzeMelodyBuffer} from '../js/dsp-client.js';
+import {melodyEvents} from '../js/melody.js';
+import {createReverb} from '../js/effects.js';
+import {AutoSynth} from '../js/auto-synth.js';
 const button=document.querySelector('#run'),out=document.querySelector('#results');
 button.onclick=async()=>{button.disabled=true;out.textContent='Running…\n';let engine;
 const report=s=>out.textContent+=s+'\n';
 try{
  const cases=Object.entries(soundBank).flatMap(([voice,presets])=>presets.map(p=>({voice,sound:p.id})));cases.push({voice:'bell'});
- const rate=44100,context=new OfflineAudioContext(1,Math.ceil(rate*(cases.length*.2+3)),rate),e=new AudioEngine(defaultSession());e.ctx=context;e.master=context.createGain();e.master.gain.value=.7;e.master.connect(context.destination);e.noise=context.createBuffer(1,rate,rate);const n=e.noise.getChannelData(0);for(let i=0;i<n.length;i++)n[i]=Math.random()*2-1;
- cases.forEach((sound,i)=>e.play({...sound,note:sound.voice==='bass'?33:60,duration:.13,velocity:.7},i*.2));
- const rendered=await context.startRendering(),data=rendered.getChannelData(0);for(let i=0;i<cases.length;i++){const values=data.subarray(Math.floor(i*.2*rate),Math.floor((i*.2+.15)*rate));const energy=values.reduce((s,v)=>s+v*v,0)/values.length;if(!(energy>.000001)||!values.every(Number.isFinite))throw new Error(cases[i].voice+'/'+cases[i].sound+' did not produce valid audio');}report('PASS · All '+cases.length+' sound presets rendered finite, non-silent audio.');
- engine=new AudioEngine(defaultSession());await engine.init();await engine.ctx.audioWorklet.addModule('../js/capture-worklet.js');
- engine.openMic=async()=>{const ctx=engine.ctx,source=ctx.createOscillator(),node=new AudioWorkletNode(ctx,'mobipad-capture');source.frequency.value=440;source.connect(node);node.connect(ctx.destination);source.start(ctx.currentTime+.04);source.stop(ctx.currentTime+.34);return {node,close(){node.disconnect();source.disconnect();}};};
- const start=engine.ctx.currentTime,recording=await engine.beginMic(start,start+.4);await new Promise(r=>setTimeout(r,500));await recording.stop();const b=engine.micBuffer(recording,start,start+.4),values=b.getChannelData(0);if(b.length!==Math.round(engine.ctx.sampleRate*.4))throw new Error('Capture length mismatch');if(!values.some(v=>Math.abs(v)>.2))throw new Error('Worklet captured silence');report('PASS · AudioWorklet captured a generated signal and trimmed an exact 400 ms take.');
+ const rate=44100,mode=document.querySelector('#eco').checked?'eco':'full';
+ for(let first=0;first<cases.length;first+=12){
+ const batch=cases.slice(first,first+12),context=new OfflineAudioContext(1,Math.ceil(rate*(batch.length*.2+3)),rate),e=new AudioEngine(defaultSession());e.setResourceMode(mode);e.ctx=context;e.master=context.createGain();e.master.gain.value=.7;e.master.connect(context.destination);e.noise=context.createBuffer(1,rate,rate);const n=e.noise.getChannelData(0);for(let i=0;i<n.length;i++)n[i]=Math.random()*2-1;
+ batch.forEach((sound,i)=>e.play({...sound,note:sound.voice==='bass'?33:60,duration:.13,velocity:.7},i*.2));
+ const rendered=await context.startRendering(),data=rendered.getChannelData(0);for(let i=0;i<batch.length;i++){const values=data.subarray(Math.floor(i*.2*rate),Math.floor((i*.2+.15)*rate));const energy=values.reduce((s,v)=>s+v*v,0)/values.length;if(!(energy>.000001)||!values.every(Number.isFinite))throw new Error(batch[i].voice+'/'+batch[i].sound+' did not produce valid audio');}
+ }
+ report('PASS · All '+cases.length+' sound presets rendered finite, non-silent audio in '+mode+' mode.');
+ engine=new AudioEngine(defaultSession());engine.setResourceMode(mode);await engine.init();await engine.ctx.audioWorklet.addModule('../js/capture-worklet.js');
+ engine.openMic=async()=>{const ctx=engine.ctx,source=ctx.createOscillator(),node=new AudioWorkletNode(ctx,'mobipad-capture');source.frequency.value=440;source.connect(node);node.connect(ctx.destination);return {node,source,close(){node.disconnect();source.disconnect();}};};
+ const recording=await engine.beginMic(0,0),start=engine.ctx.currentTime;recording.source.start(start+.08);recording.source.stop(start+.34);const deadline=performance.now()+5000;while(engine.ctx.currentTime<start+.45&&performance.now()<deadline)await new Promise(r=>setTimeout(r,30));await recording.stop();const b=engine.micBuffer(recording,start,start+.4),values=b.getChannelData(0);if(b.length!==Math.round(engine.ctx.sampleRate*.4))throw new Error('Capture length mismatch');if(!values.some(v=>Math.abs(v)>.2))throw new Error('Worklet captured silence');report('PASS · AudioWorklet captured a generated signal and trimmed an exact 400 ms take.');
  const wav=engine.bufferWav(b),decoded=await engine.ctx.decodeAudioData(wav);if(Math.abs(decoded.duration-.4)>.001)throw new Error('WAV roundtrip duration mismatch');report('PASS · Recorded WAV encoded and decoded with the expected duration.');
  engine.buffers.set('test',decoded);engine.session.pads[12]={...engine.session.pads[12],kind:'audio',audioId:'test',bars:1};engine.master.gain.value=0;const fitted=await engine.preparePad(12);let bestFrequency=0,bestPower=-1;const signal=fitted.getChannelData(0);for(let frequency=430;frequency<=450;frequency++){const coefficient=2*Math.cos(2*Math.PI*frequency/fitted.sampleRate);let a=0,b=0;for(let i=Math.floor(signal.length*.2);i<signal.length*.75;i++){const v=signal[i]+coefficient*a-b;b=a;a=v;}const power=a*a+b*b-coefficient*a*b;if(power>bestPower){bestPower=power;bestFrequency=frequency;}}if(Math.abs(bestFrequency-440)>2)throw new Error("Worker changed pitch: "+bestFrequency);report("PASS · Background time stretching retained the 440 Hz fundamental.");engine.launchAudio(12,engine.ctx.currentTime+.03,0);report('PASS · Imported AudioBuffer scheduled with pitch-preserving tempo fit.');
+ engine.active.set(12,{start:0});engine.start(engine.now()-500);
+ await engine.ctx.suspend();await new Promise(r=>setTimeout(r,150));
+ const resumed=new Promise(resolve=>engine.addEventListener('audiostate',()=>{if(engine.ctx.state==='running')resolve();}));
+ await engine.ctx.resume();await resumed;
+ if(![...engine.nodes].some(n=>n.padId===12))throw new Error('Interrupted sample did not resume');
+ report('PASS · Suspended audio resumed its loop from the current shared phase.');
+ const fixture=sungFixture(),voice=engine.ctx.createBuffer(1,fixture.samples.length,fixture.rate);voice.copyToChannel(fixture.samples,0);
+ const melody=await analyzeMelodyBuffer(voice),events=melodyEvents(melody,{beats:4,key:'C minor'});
+ if(events.length!==4||events.map(e=>e.note).join(',')!=='60,62,65,67')throw new Error('Auto synth melody/key mismatch');
+ report('PASS · Background Auto synth recovered four detuned sung notes and tuned them to C minor.');
+ const room=new OfflineAudioContext(2,rate*3,rate),input=room.createGain();createReverb(room,input,room.destination,.7,'hall');
+ const impulse=room.createBuffer(1,1,rate);impulse.getChannelData(0)[0]=1;const hit=room.createBufferSource();hit.buffer=impulse;hit.connect(input);hit.start(.02);
+ const tail=await room.startRendering();if(!tail.getChannelData(0).subarray(rate/2,rate).some(v=>Math.abs(v)>1e-5))throw new Error('Reverb tail was silent');
+ report('PASS · Native stereo hall reverb rendered a finite, audible tail.');
+ const fields=document.createElement('div');fields.hidden=true;fields.innerHTML='<dialog id="auto-dialog"></dialog><select id="auto-key"><option value="auto">Auto</option></select><select id="auto-voice"><option value="pure">Pure</option></select><select id="auto-timing"><option value="natural">Natural</option></select><select id="auto-space"><option value="room">Room</option></select><input id="auto-reverb" value="0"><input id="auto-echo" value="0"><input id="auto-replace" type="checkbox"><button id="auto-preview"></button><button id="auto-create"></button><button id="auto-stop"></button><p id="auto-report"></p><p id="auto-notes"></p>';document.body.append(fields);
+ engine.buffers.set('sung',voice);Object.assign(engine.session.pads[13],{kind:'audio',audioId:'sung',bars:1,events:[]});let generated;
+ const converter=new AutoSynth({audio:engine,getSession:()=>engine.session,ready:async()=>{},commit:async value=>generated=value,notify:()=>{}});
+ await converter.open(13,{automatic:true,startBeat:0});
+ if(!generated?.replace||generated.events.length!==4||generated.events.some(e=>e.voice!=='synth'||e.sound!=='pure')||document.querySelector('#auto-timing').value!=='natural')throw new Error('Automatic take conversion failed');
+ fields.remove();report('PASS · Automatic take conversion selected a pure, naturally timed synth loop.');
  report('ALL BROWSER AUDIO CHECKS PASSED');
-}catch(error){report('FAIL · '+error.message);console.error(error);}finally{await engine?.ctx?.close();button.disabled=false;}
+}catch(error){report('FAIL · '+error.message);console.error(error);}finally{engine?.stop();await engine?.ctx?.close();button.disabled=false;}
 };
 </script></body></html>
