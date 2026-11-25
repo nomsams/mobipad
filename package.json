@@ -1,0 +1,18 @@
+{
+  "name": "mobipad",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A pocket-sized browser music studio and peer-to-peer jam room",
+  "scripts": {
+    "start": "node scripts/serve.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "check": "node scripts/check.mjs",
+    "vendor": "node scripts/vendor.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "peerjs": "1.5.5",
+    "qrcode": "1.5.4"
+  }
+}

@@ -1,1 +1,84 @@
-# mobipad
+# MOBIPAD · Pocket studio
+
+A mobile-first launchpad and loop station, written in HTML, CSS and JavaScript. Runs entirely in the browser. No app server, account, build step, paid sound packs, or API keys required.
+
+**App:** [nomsams.github.io/mobipad](https://nomsams.github.io/mobipad/) · **Repository:** [nomsams/mobipad](https://github.com/nomsams/mobipad)
+
+## Run
+
+Requires Node 22+ for the development server and checks. Runtime has no Node dependency.
+
+```sh
+npm start
+```
+
+Open **http://localhost:5173**. Audio starts on the first interaction. Microphone capture requires HTTPS or localhost. To use real phones, deploy to GitHub Pages; an ordinary HTTP LAN address will not grant microphone access on most browsers.
+
+## Play
+
+- **Launchpad:** 16 color-coded pads. Loops toggle at the next bar or beat. One shots respond immediately. The instant launch option uses the nearest upcoming sixteenth. Double-tap or hold a populated pad to rename it, change its level or audio length, import, record, or clear it. Tap an empty pad to add a sound.
+- **Instruments:** synthesized piano, bass, guitar, and synth with octave changes and chromatic/major/minor/pentatonic keyboards. Eight finger drums, including a triangle. Capture records quantized note events after a one-bar count-in; the chosen number of bars closes automatically.
+- **Sequencer:** sixteenth-note drum patterns, odd meters, three starter rhythms, swing, and save-to-pad.
+- **Microphone:** unprocessed mono PCM capture through an AudioWorklet; no live monitoring, to avoid feedback. Recording is count-in aligned and trimmed to exact bar length. Configurable input compensation accounts for microphone delay. Use headphones while capturing over an existing groove.
+- **Import:** browser-decodable audio up to 25 MB / 10 minutes per sample. The app estimates a nearby bar count; set its actual length in the pad editor. Clips follow tempo through playback speed, **which also changes pitch**. There is no pitch-preserving time stretch or automatic beat detection.
+- **Presets:** four original synthesized packs: After hours, Dusty corners, Neon current, and Sunset club. No licensed music or fetched sound assets.
+- **Mix:** mute and level controls, master limiter, and downloadable live mix recording in the browser's MediaRecorder format (usually WebM or M4A).
+- **Projects:** IndexedDB autosave, JSON export including audio, and import. A new session first downloads a backup. Samples remain in the local library. Browser storage may be cleared or evicted; export backups.
+- **Offline:** after the first successful online load, a service worker caches runtime files. Jamming still requires signaling connectivity. The remote font is optional; system fonts work offline.
+
+**Desktop shortcuts:** Space toggles transport; Escape stops locally; 1–4, Q–R, A–F, Z–V trigger pads. In Instruments, A–K play the keyboard. Multitouch is supported on pads, drums, and keys.
+
+## Jam with multiple phones
+
+1. Open the same deployed HTTPS URL on each phone. Pick **Jam together → Create a room** on the leader.
+2. Scan its QR code with the other phones' cameras, or paste its link / six-character room code. Tap **Join** to authorize audio playback.
+3. The leader controls tempo, meter, sound pack, and transport. All phones can trigger pads, play instruments, edit the drum pattern, and contribute audio clips. Room members receive shared audio. Room codes are invitation secrets, not authentication; share with people you want in the jam.
+4. Every peer runs audio locally. Reliable WebRTC data channels carry musical events, the clock, state, and sample chunks in a star topology through the leader. Live touches preview immediately on the source phone and use a configurable **120 ms** default buffer on other phones. This supports beat-synced jamming, not zero-delay remote monitoring.
+5. Clock probes estimate leader offset using the median of the five lowest round-trip samples. Loop launches use the shared musical position and precise AudioContext scheduling. **Listen & align** on a follower records three 1800 Hz leader tones, checks spacing, estimates speaker phase from arrival timing, and applies input/output latency estimates. This is approximate; tune Speaker alignment by ear for your hardware. It needs a quiet environment and an audible leader speaker.
+6. If a connection drops, peers try to reconnect every two seconds. The leader sends a fresh session snapshot and sample files to rejoining peers. On page reload, choose **Rejoin previous room**; an audio gesture is required. The leader must return to the same room. There is no automatic leader election.
+
+The default public [PeerJS Cloud](https://peerjs.com/client/faq) performs signaling; established data uses WebRTC. Some carriers, corporate networks, VPNs, or symmetric NATs require TURN. Connection settings support a custom HTTPS PeerServer and TURN URL/credentials. TURN credentials remain in page memory. Do not embed permanent relay secrets in a public repository.
+
+Keep all pages in the foreground. Screen Wake Lock is requested while playing when supported. Background throttling, Bluetooth, device input latency, network jitter, and physical distance prevent perfect synchronization on arbitrary phones. Reconnect and acoustic calibration need testing on your actual devices and network.
+
+## Publish on GitHub Pages
+
+The deployment target is [nomsams.github.io/mobipad](https://nomsams.github.io/mobipad/). Push to `nomsams/mobipad` on `main` or `master`, then in **Settings → Pages → Build and deployment → Source**, choose **GitHub Actions**. The included [Pages workflow](.github/workflows/pages.yml) validates, tests, and uploads only static runtime files. Relative asset paths support a repository subpath.
+
+Alternatively, serve the repository root from a Pages branch: it has `index.html` and `.nojekyll`. No npm install is needed in production.
+
+```sh
+git remote add origin https://github.com/nomsams/mobipad.git
+git push -u origin main
+```
+
+The deployment workflow accepts `main` and `master`.
+
+Commit with a GitHub noreply identity; do not use a personal email address. Local project recordings, environment files, and credentials must not be committed.
+
+## Checks and dependencies
+
+```sh
+npm run check
+npm test
+```
+
+Tests cover timeline math, launch boundaries, quantization, clock estimation, WAV encoding, preset validation, odd meters, microphone trimming, muted scheduling, command deduplication, and transfer limits. Browser/device checks: [QA.md](QA.md).
+
+PeerJS 1.5.5 and QRCode 1.5.4 are pinned and vendored with MIT licenses. Development-only esbuild bundles QRCode. Rebuild with:
+
+```sh
+npm ci
+npm run vendor
+```
+
+## Implementation
+
+- `js/engine.js`: shared audio graph, synthesized instruments, 20 ms scheduler with 90 ms look-ahead, sample playback, microphone capture and WAV encoding.
+- `js/capture-worklet.js`: timestamped mono render-thread capture. No ScriptProcessor fallback.
+- `js/jam.js`: PeerJS, bounded transfers, clock probes, reconnect and state events.
+- `js/app.js`: touch UI, recording, library, projects, room coordination and acoustic calibration.
+- `js/storage.js`: IndexedDB and portable projects.
+- `js/timing.js` and `js/presets.js`: pure timing, validation and preset data.
+
+Research and design decisions: [RESEARCH.md](RESEARCH.md).

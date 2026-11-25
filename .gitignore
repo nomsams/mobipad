@@ -1,0 +1,10 @@
+node_modules/
+test-results/
+*.log
+.env
+.env.*
+!.env.example
+*.mobipad.json
+*-mix.webm
+*-mix.m4a
+recordings/

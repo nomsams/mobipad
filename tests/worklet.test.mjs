@@ -1,0 +1,8 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import vm from 'node:vm';
+const source=await readFile(new URL('../js/capture-worklet.js',import.meta.url),'utf8');
+function setup(){let Processor;const sent=[];const context=vm.createContext({Float32Array,sampleRate:48000,currentTime:1,AudioWorkletProcessor:class{constructor(){this.port={postMessage:data=>sent.push(data)};}},registerProcessor:(_,p)=>Processor=p});vm.runInContext(source,context);return {processor:new Processor(),context,sent};}
+test('worklet handles arbitrary block lengths, averages channels and flushes the last partial block',()=>{const {processor:p,context,sent}=setup();p.port.onmessage({data:{type:'start'}});p.process([[new Float32Array(100).fill(1),new Float32Array(100).fill(-.5)]]);context.currentTime+=100/48000;p.process([[new Float32Array(37).fill(.5)]]);p.port.onmessage({data:{type:'stop'}});assert.equal(sent.length,2);assert.equal(sent[0].type,'samples');assert.equal(sent[0].time,1);assert.equal(sent[0].samples.length,137);assert.equal(sent[0].samples[0],.25);assert.equal(sent[0].samples[136],.5);assert.equal(sent[1].type,'stopped');});
+test('worklet fills chunks without losing samples across quantum boundaries',()=>{const {processor:p,sent}=setup();p.port.onmessage({data:{type:'start'}});for(let i=0;i<17;i++)p.process([[new Float32Array(128).fill(.2)]]);p.port.onmessage({data:{type:'stop'}});const chunks=sent.filter(x=>x.type==='samples');assert.deepEqual(chunks.map(x=>x.samples.length),[2048,128]);assert.equal(chunks.reduce((n,c)=>n+c.samples.length,0),2176);p.process([[new Float32Array(128)]]);assert.equal(sent.length,3);});
