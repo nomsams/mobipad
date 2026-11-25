@@ -1,5 +1,6 @@
 import { beatDuration, positionAt, nextBoundary, wavEncode } from "./timing.js";
-import { drums } from "./presets.js";
+import { drums,resizePattern } from "./presets.js";
+import {normalizeScenes} from './performance.js';
 import { getSound, defaultRack } from "./sounds.js";
 import { pluckedString } from "./string-model.js";
 import { Arpeggiator } from "./arpeggiator.js";
@@ -34,7 +35,7 @@ class AudioEngine extends EventTarget {
     this.sampleVersions = new Map();
     this.resourceMode='full';this.maxSources=resourceProfiles.full.maxSources;
   }
-  isSamplePinned(id){if(this.editingSample===id)return true;return this.session.pads.some(p=>p.audioId===id&&(this.active.has(p.id)||this.pending.get(p.id)?.on||this.running&&this.session.seqEnabled&&p.sequenceEnabled||[...this.nodes].some(n=>n.padId===p.id)));}
+  isSamplePinned(id){if(this.editingSample===id)return true;return this.session.pads.some(p=>p.audioId===id&&(this.active.has(p.id)||this.pending.get(p.id)?.on||this.pendingScene?.scene.padIds.includes(p.id)||this.scenePreparing?.has(p.id)||this.running&&this.session.seqEnabled&&p.sequenceEnabled||[...this.nodes].some(n=>n.padId===p.id)));}
   setResourceMode(mode){this.resourceMode=mode==='eco'?'eco':'full';const profile=resourceProfiles[this.resourceMode];this.maxSources=profile.maxSources;this.buffers.setBudget?.(profile.rawBytes);this.stringBuffers.setBudget?.(profile.stringBytes);this.processedBuffers.setBudget?.(profile.processedBytes);this.stretchedBuffers.setBudget?.(profile.stretchBytes);}
   async init() {
     if (!this.ctx) {
@@ -56,11 +57,23 @@ class AudioEngine extends EventTarget {
       for (let i = 0; i < a.length; i++) a[i] = Math.random() * 2 - 1;
       this.ctx.onstatechange = () => this.handleAudioState();
     }
-    await this.ctx.resume();
+    if(this.ctx.state==='closed')throw new Error('Audio was closed. Reload the page to start it again.');
+    if(this.ctx.state!=='running')await this.ctx.resume();
     return this.ctx;
   }
   now() {
-    return Date.now() + this.clockOffset;
+    return performance.timeOrigin + performance.now() + this.clockOffset;
+  }
+  anchorAudioClock(){
+    this.audioEpoch=this.ctx.currentTime+(this.epoch-this.now())/1000;
+    this.anchorOffset=this.clockOffset;this.clockCorrection=0;this.lastClockTime=this.ctx.currentTime;
+  }
+  correctAudioClock(){
+    if(!Number.isFinite(this.audioEpoch))return;
+    if(this.anchorOffset!==this.clockOffset){this.clockCorrection-=(this.clockOffset-this.anchorOffset)/1000;this.anchorOffset=this.clockOffset;}
+    const elapsed=Math.max(0,Math.min(.2,this.ctx.currentTime-this.lastClockTime));this.lastClockTime=this.ctx.currentTime;
+    const correction=Math.max(-elapsed*.01,Math.min(elapsed*.01,this.clockCorrection));
+    this.audioEpoch+=correction;this.clockCorrection-=correction;
   }
   handleAudioState() {
     if(this.ctx.state!=='running')this.interrupted=this.running;
@@ -70,6 +83,7 @@ class AudioEngine extends EventTarget {
       // Discard old scheduled sources and resume loops at the current shared phase.
       for(const source of this.nodes){try{source.stop();}catch{}}
       this.nodes.clear();
+      this.anchorAudioClock();
       this.nextStep=Math.max(0,Math.ceil(this.position()*4));this.arp.nextBeat=null;
       for(const id of this.active.keys())this.resumeAudioPad(id);
       this.schedule();
@@ -77,15 +91,23 @@ class AudioEngine extends EventTarget {
     this.dispatchEvent(new Event('audiostate'));
   }
   position() {
-    return this.running ? positionAt(this.now(), this.epoch, this.session.bpm) : 0;
+    return this.running ? Number.isFinite(this.audioEpoch)?(this.ctx.currentTime-this.audioEpoch)/beatDuration(this.session.bpm):positionAt(this.now(), this.epoch, this.session.bpm) : 0;
+  }
+  audiblePosition(){
+    if(!this.running)return 0;
+    let time=this.ctx.currentTime-(this.ctx.baseLatency||0)-(this.ctx.outputLatency||0);
+    const stamp=this.ctx.getOutputTimestamp?.();
+    if(stamp?.performanceTime>0&&stamp.contextTime>=0)time=Math.min(this.ctx.currentTime,stamp.contextTime+(performance.now()-stamp.performanceTime)/1000);
+    return Number.isFinite(this.audioEpoch)?(time-this.audioEpoch-this.session.outputOffset/1000)/beatDuration(this.session.bpm):this.position();
   }
   timeForBeat(beat) {
-    return this.ctx.currentTime + (this.epoch + beat * beatDuration(this.session.bpm) * 1e3 - this.now() + this.session.outputOffset) / 1e3;
+    return (Number.isFinite(this.audioEpoch)?this.audioEpoch:this.ctx.currentTime+(this.epoch-this.now())/1000)+beat*beatDuration(this.session.bpm)+this.session.outputOffset/1000;
   }
   start(epoch = this.now() + 140) {
     if (!this.ctx) throw new Error("Audio is not initialized.");
     this.stop(false, false);
     this.epoch = epoch;
+    this.anchorAudioClock();
     this.running = true;
     this.interrupted=this.ctx.state!=='running';
     this.nextStep = Math.max(0, Math.ceil(this.position() * 4));
@@ -100,6 +122,7 @@ class AudioEngine extends EventTarget {
     this.previewCleanup?.();
     clearInterval(this.timer);
     this.running = false;
+    this.audioEpoch=null;
     this.interrupted=false;
     for (const n of this.nodes) {
       try {
@@ -109,6 +132,7 @@ class AudioEngine extends EventTarget {
     }
     this.nodes.clear();
     this.pending.clear();
+    this.pendingScene=null;this.scenePreparing=null;this.lastScene=null;
     // Recreate delay lines so Stop also clears audio still circulating in feedback.
     for(const fx of this.padEffects.values()){fx.delay.disconnect();fx.wet.disconnect();fx.feedback.disconnect();fx.reverb?.dispose();}
     for(const bus of this.padBuses?.values()||[])bus.disconnect();
@@ -217,12 +241,13 @@ class AudioEngine extends EventTarget {
   resumeAudioPad(id) {
     const p = this.session.pads[id], active = this.active.get(id);
     if (!this.running || !active || !p?.audioId || !this.buffers.has(p.audioId) || [...this.nodes].some((n) => n.padId === id)) return;
-    const pos = positionAt(this.now() + 30 - this.session.outputOffset - (p.preDelay || 0), this.epoch, this.session.bpm);
+    const pos = this.position()+(.03-(this.session.outputOffset+(p.preDelay||0))/1000)/beatDuration(this.session.bpm);
     const relative = pos - active.start;
     if (relative < 0) this.launchAudio(id, Math.max(this.ctx.currentTime + 3e-3, this.timeForBeat(active.start)), active.start);
     else this.launchAudio(id, this.ctx.currentTime + 0.03 - (p.preDelay || 0) / 1e3, pos, relative % (p.bars * this.session.beats));
   }
   queuePad(id, grid = "bar", atBeat = null, desired = null) {
+    this.pendingScene=null;this.lastScene=null;
     const on = desired ?? !(this.pending.get(id)?.on ?? this.active.has(id));
     if (!this.running) this.start();
     const q = grid === "off" ? 0 : grid === "beat" ? 1 : this.session.beats;
@@ -239,8 +264,27 @@ class AudioEngine extends EventTarget {
     } else this.pending.set(id, { beat, on });
     return { id, beat, on };
   }
+  queueScene(scene,beat){
+    if(!this.running||!Number.isFinite(beat))throw new Error('Start the transport before launching a scene.');
+    this.pendingScene={scene:normalizeScenes([scene])[0],beat};this.pending.clear();
+    this.dispatchEvent(new Event('scenequeued'));
+    this.dispatchEvent(new Event('pads'));
+  }
+  applyScene(scene,startBeat,beat,time){
+    for(let id=0;id<16;id++)this.cancelPad(id,time);
+    this.active.clear();this.pending.clear();
+    this.session.pattern=resizePattern(scene.pattern,this.session.beats);this.session.seqEnabled=scene.seqEnabled;this.session.swing=scene.swing;
+    for(const id of scene.padIds){
+      const p=this.session.pads[id];if(!p||!['loop','audio'].includes(p.kind))continue;
+      this.active.set(id,{start:startBeat});this.muted.delete(id);
+      if(p.audioId)this.launchAudio(id,time,beat,Math.max(0,beat-startBeat)%(p.bars*this.session.beats));
+    }
+    this.lastScene=scene.id;this.dispatchEvent(new CustomEvent('scene',{detail:{id:scene.id,name:scene.name,beat:startBeat}}));
+    this.dispatchEvent(new Event('pads'));
+  }
   schedule() {
     if (!this.running || this.ctx.state !== "running") return;
+    this.correctAudioClock();
     const now = this.ctx.currentTime;
     const pos = this.position();
     const arpConfig = this.session.rack?.arp;
@@ -282,6 +326,7 @@ class AudioEngine extends EventTarget {
     }
   }
   scheduleStep(beat, time) {
+    if(this.pendingScene&&beat>=this.pendingScene.beat-1e-6){const {scene,beat:start}=this.pendingScene;this.pendingScene=null;this.applyScene(scene,start,beat,time);}
     const spb = beatDuration(this.session.bpm);
     if (Number.isInteger(beat)) {
       const accent = beat % this.session.beats === 0;
@@ -414,11 +459,11 @@ class AudioEngine extends EventTarget {
     const rack = this.session.rack || defaultRack();
     const sound = getSound(voice, e.sound || rack.sounds[voice]);
     const tone = { ...rack.tone, ...e.tone };
-    const osc = (type, f2, decay, amp = v, slide = null) => {
+    const osc = (type, f2, decay, amp = v, slide = null, slideTime = null) => {
       const n2 = c.createOscillator(), g2 = c.createGain();
       n2.type = type;
       n2.frequency.setValueAtTime(f2, t);
-      if (slide) n2.frequency.exponentialRampToValueAtTime(slide, t + decay * 0.8);
+      if (slide) n2.frequency.exponentialRampToValueAtTime(slide, t + (slideTime??decay*.8));
       g2.gain.setValueAtTime(0, t);
       g2.gain.linearRampToValueAtTime(amp * 0.4, t + 3e-3);
       g2.gain.exponentialRampToValueAtTime(1e-4, t + decay);
@@ -445,7 +490,7 @@ class AudioEngine extends EventTarget {
       n2.addEventListener("ended", () => f2.disconnect());
     };
     if (voice === "kick") {
-      osc("sine", sound.start, sound.decay, v * 1.5, sound.end);
+      osc("sine", sound.start, sound.decay, v * 1.5, sound.end,Math.min(.055,sound.decay*.2));
       if (sound.click) noise(0.018, 2400, "highpass", v * sound.click);
       if (sound.drive) osc("triangle", sound.start * 0.7, 0.15, v * 0.45, sound.end);
       return;

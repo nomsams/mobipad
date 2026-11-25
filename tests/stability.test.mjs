@@ -30,7 +30,7 @@ test('Stop disconnects feedback delay lines and the old pad buses',()=>{
 });
 test('a pending instrument press cannot sound after the rack is released',async()=>{
   const r=Object.create(InstrumentRack.prototype);let finish,played=0;
-  Object.assign(r,{generation:1,voice:'piano',ready:()=>new Promise(resolve=>finish=resolve),perform:()=>played++});
+  Object.assign(r,{generation:1,voice:'piano',audio:{ctx:{state:'suspended'}},ready:()=>new Promise(resolve=>finish=resolve),perform:()=>played++});
   const pending=r.press(60,'key');r.generation++;finish();await pending;assert.equal(played,0);
 });
 test('jam startup, remembering and leaving work when browser storage is denied',t=>{

@@ -1,0 +1,26 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mobipad timing checks</title><style>body{background:#111813;color:#d5e6cb;font:16px system-ui;padding:24px}button{padding:14px 18px;background:#caee91;color:#16200f;border:0;border-radius:8px;font:inherit;margin:8px 0;touch-action:none}pre{white-space:pre-wrap;line-height:1.7}</style></head><body><h1>Timing and touch checks</h1><p>Generated audio only. Measures internal audio timing, not Bluetooth or physical speaker delay.</p><button id="wake">Wake audio</button><button id="finger" disabled>Tap kick</button><p id="touch" role="status">Wake audio, then tap the kick.</p><button id="run" disabled>Measure sequencer under UI load</button><pre id="results" role="status">Ready.</pre><script type="module">
+import {AudioEngine} from '../js/engine.js';
+import {InstrumentRack} from '../js/instrument-rack.js';
+import {defaultSession} from '../js/presets.js';
+const e=new AudioEngine(defaultSession()),out=document.querySelector('#results'),finger=document.querySelector('#finger');let pressedAt=0,pressedAudio=0;
+const rack=Object.create(InstrumentRack.prototype);Object.assign(rack,{audio:e,generation:0,voice:'drums',pointers:new Map(),keyNotes:new Map(),slideNotes:new Map(),getSession:()=>e.session,ready:async()=>{throw Error('Warm press unexpectedly awaited setup');},notify:message=>document.querySelector('#touch').textContent='FAIL · '+message,renderArpStatus:()=>{},perform:event=>{const time=e.ctx.currentTime+.003;e.play(event,time);document.querySelector('#touch').textContent=`PASS · Sound scheduled in ${(performance.now()-pressedAt).toFixed(2)} ms; audio lead ${((time-pressedAudio)*1000).toFixed(2)} ms. Hardware delay excluded.`;}});
+finger.addEventListener('pointerdown',()=>{pressedAt=performance.now();pressedAudio=e.ctx.currentTime;},{capture:true});rack.bindPlayable(finger,60,'kick');
+document.querySelector('#wake').onclick=async()=>{await e.init();await e.ctx.audioWorklet.addModule('../js/capture-worklet.js');finger.disabled=false;document.querySelector('#run').disabled=false;document.querySelector('#touch').textContent='Audio awake. Tap kick to measure the production pointer handler.';};
+document.querySelector('#run').onclick=async()=>{
+ const button=document.querySelector('#run');button.disabled=true;let stress,take;
+ try{
+  await e.init();e.stop();e.session.bpm=120;e.session.swing=0;e.session.seqEnabled=true;e.session.inputLatency=0;e.master.gain.value=.8;
+  e.session.pattern=Object.fromEntries(['kick','snare','hat','clap'].map(v=>[v,Array.from({length:16},(_,i)=>v==='kick'&&i%4===0)]));
+  e.limiter.disconnect(e.ctx.destination);
+  e.openMic=async()=>{const node=new AudioWorkletNode(e.ctx,'mobipad-capture');e.master.connect(node);node.connect(e.ctx.destination);return {node,close(){e.master.disconnect(node);node.disconnect();}};};
+  take=await e.beginMic(0,0);e.start(e.now()+240);const start=e.timeForBeat(0),end=start+3.7,deadline=performance.now()+10000;out.textContent='Measuring eight quarter-note kicks with 35 ms UI stalls…';
+  stress=setInterval(()=>{const end=performance.now()+35;while(performance.now()<end){}},170);
+  while(e.ctx.currentTime<end&&performance.now()<deadline)await new Promise(r=>setTimeout(r,25));
+  clearInterval(stress);e.stop();await take.stop();const buffer=e.micBuffer(take,start-.02,end),data=buffer.getChannelData(0),hits=[];let last=-Infinity;
+  for(let i=0;i<data.length;i++)if(Math.abs(data[i])>.035&&i-last>buffer.sampleRate*.35){hits.push(i/buffer.sampleRate);last=i;}
+  if(hits.length!==8)throw Error('Expected 8 kick attacks; captured '+hits.length);
+  const error=Math.max(...hits.slice(1).map((t,i)=>Math.abs(t-hits[i]-.5)*1000));if(error>2)throw Error('Kick interval jitter '+error.toFixed(3)+' ms');
+  out.textContent=`PASS · ${hits.length} quarter-note kicks at 120 BPM, swing 0.\nWorst measured spacing error: ${error.toFixed(3)} ms under UI load.\nCapture rate: ${buffer.sampleRate} Hz. No physical microphone used.`;
+ }catch(error){out.textContent='FAIL · '+error.message;console.error(error);}finally{clearInterval(stress);e.stop();await take?.stop();e.limiter.connect(e.ctx.destination);button.disabled=false;}
+};
+</script></body></html>

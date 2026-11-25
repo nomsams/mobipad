@@ -185,7 +185,7 @@ class InstrumentRack {
     const token = {};
     const generation=this.generation;
     this.pendingNotes.set(key, token);
-    await this.ready();
+    if(this.audio.ctx?.state!=='running')await this.ready();
     if(generation!==this.generation)return;
     const event = this.event(note, voice);
     if (this.state().arp.enabled && voice !== "drums" && !drums.includes(voice)) {
@@ -358,7 +358,7 @@ class InstrumentRack {
   }
   async strum(notes) {
     const generation=this.generation;
-    await this.ready();
+    if(this.audio.ctx?.state!=='running')await this.ready();
     if(generation!==this.generation)return;
     const order = $("#strum-direction").value === "up" ? [...notes].reverse() : notes, spread = Number($("#strum-spread").value) / 1e3;
     for (const [i, note] of order.entries()) this.perform({ ...this.event(note), velocity: 0.6 + i * 0.025 }, this.audio.ctx.currentTime + 5e-3 + i * spread);

@@ -1,3 +1,4 @@
+import {normalizeScenes} from './performance.js';
 import { validSampleSettings } from "./sample-analysis.js";
 import { defaultRack, normalizeRack, validSound, validTone } from "./sounds.js";
 const padKeys = ["1", "2", "3", "4", "q", "w", "e", "r", "a", "s", "d", "f", "z", "x", "c", "v"];
@@ -50,7 +51,7 @@ function makePads(packId = "afterhours") {
   return pads;
 }
 function defaultSession() {
-  return { rack: defaultRack(), version: 1, name: "Untitled session", bpm: 110, beats: 4, bars: 2, pack: "afterhours", swing: 0, pads: makePads(), pattern: pattern(), seqEnabled: false, master: 0.8, inputLatency: 20, outputOffset: 0, jamBuffer: 120 };
+  return { scenes: [], rack: defaultRack(), version: 1, name: "Untitled session", bpm: 110, beats: 4, bars: 2, pack: "afterhours", swing: 0, pads: makePads(), pattern: pattern(), seqEnabled: false, master: 0.8, inputLatency: 20, outputOffset: 0, jamBuffer: 120 };
 }
 function validateSession(s) {
   if (!s || s.version !== 1 || !Array.isArray(s.pads) || s.pads.length !== 16) throw new Error("This is not a Mobipad project.");
@@ -63,7 +64,7 @@ function validateSession(s) {
   for (const p of s.pads) for (const e of p.events) if (!validSound(e.voice, e.sound) || !validTone(e.tone)) throw new Error("Invalid note sound.");
   if (!s.pattern || !["kick", "snare", "hat", "clap"].every((k) => Array.isArray(s.pattern[k]) && s.pattern[k].length === s.beats * 4 && s.pattern[k].every((x) => typeof x === "boolean"))) throw new Error("Invalid drum pattern.");
   if (typeof s.name !== "string" || s.name.length > 100) throw new Error("Invalid session name.");
-  return { ...defaultSession(), ...s, rack: normalizeRack(s.rack), master: Math.min(1, Math.max(0, Number(s.master) || 0)), swing: Math.min(60, Math.max(0, Number(s.swing) || 0)), inputLatency: Math.min(500, Math.max(0, Number(s.inputLatency) || 0)), outputOffset: Math.min(500, Math.max(-500, Number(s.outputOffset) || 0)), jamBuffer: Math.min(500, Math.max(40, Number(s.jamBuffer) || 120)) };
+  return { ...defaultSession(), ...s, scenes: normalizeScenes(s.scenes), rack: normalizeRack(s.rack), master: Math.min(1, Math.max(0, Number(s.master) || 0)), swing: Math.min(60, Math.max(0, Number(s.swing) || 0)), inputLatency: Math.min(500, Math.max(0, Number(s.inputLatency) || 0)), outputOffset: Math.min(500, Math.max(-500, Number(s.outputOffset) || 0)), jamBuffer: Math.min(500, Math.max(40, Number(s.jamBuffer) || 120)) };
 }
 export {
   colors,

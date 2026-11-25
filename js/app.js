@@ -2,6 +2,8 @@ import { analyzeBuffer, setDSPResourceMode } from "./dsp-client.js";
 import {Presentation} from './presentation.js';
 import {resourceProfiles} from './device.js';
 import {AutoSynth} from './auto-synth.js';
+import {PerformanceTools} from './performance-tools.js';
+import {validPattern,normalizeScenes} from './performance.js';
 import { bindStepEditing } from "./sequence-input.js";
 import { AudioEngine } from "./engine.js";
 import { defaultSession, validateSession, makePads, packs, padKeys, drums, drumNames, pattern, resizePattern, colors } from "./presets.js";
@@ -17,7 +19,7 @@ let tempoTimer = null, tempoPreparing = false;
 let operationVersion=0, startingRecording=null;
 let session = defaultSession(), samples = [], view = "pads", mode = "loop", instrument = "piano", octave = 4, selected = 12, saveTimer, toastTimer, restoring = false, recording = null, mixRecorder = null, wakeLock = null, writing = false;
 const audio = new AudioEngine(session), jam = new JamRoom();
-const rack = new InstrumentRack({ audio, getSession: () => session, ready, perform: performNote, changed, notify: toast, onVoice: (v) => instrument = v, changeSound: (voice, id) => sendAction({ type: "sound", voice, id }), changeKit: (id) => sendAction({ type: "kit", id }), startTransport: () => {
+const rack = new InstrumentRack({ audio, getSession: () => session, ready:readyInstrument, perform: performNote, changed, notify: toast, onVoice: (v) => instrument = v, changeSound: (voice, id) => sendAction({ type: "sound", voice, id }), changeKit: (id) => sendAction({ type: "kit", id }), startTransport: () => {
   if (jam.role === "follower") throw new Error("The leader needs to start the transport for the arpeggiator.");
   sendAction({ type: "start", epoch: audio.now() + 180 });
 } });
@@ -30,6 +32,13 @@ const autoSynth=new AutoSynth({audio,getSession:()=>session,ready,notify:toast,c
   switchView('pads');
 }});
 const sampleLoads = new Map();
+const performanceTools=new PerformanceTools({audio,getSession:()=>session,getRole:()=>jam.role,ready,send:sendAction,notify:toast,commitCapture:async take=>{
+  const version=operationVersion;await readyInstrument();if(version!==operationVersion)throw new Error('Catch cancelled because the transport changed.');
+  const id=emptyPad();sendAction({type:'setpad',pad:{...session.pads[id],kind:'loop',name:'Caught idea',audioId:null,events:take.events,bars:take.bars,volume:.75}});selected=id;renderQuickPad();
+  if(!audio.running&&jam.role!=='follower')sendAction({type:'start',epoch:audio.now()+250});
+  if(audio.running){const originalBeat=take.epoch===audio.epoch?(take.start-audio.epoch)/1000/beatDuration(session.bpm):null;const beat=originalBeat!==null&&originalBeat>=audio.position()-120?originalBeat:nextBoundary(audio.position()+.16/beatDuration(session.bpm),session.beats);sendAction({type:'pad',id,beat,on:true,catchUp:true});}
+  switchView('pads');
+}});
 async function ensureSample(id) {
   if (!id || audio.buffers.has(id)) return;
   if (!sampleLoads.has(id)) {
@@ -81,13 +90,22 @@ function changed() {
 async function ready(sampleId) {
   await audio.init();
   await prepareSamples(sampleId);
+  updateAudioInfo();
+}
+async function readyInstrument(){
+  if(audio.ctx?.state==='running')return;
+  await audio.init();updateAudioInfo();
+}
+function updateAudioInfo(){
   $("#audio-status").textContent = `Audio ready · ${Math.round((audio.ctx.outputLatency || audio.ctx.baseLatency || 0) * 1e3)} ms output`;
   $("#latency-info").textContent = `Sample rate: ${audio.ctx.sampleRate.toLocaleString()} Hz. Base latency: ${Math.round((audio.ctx.baseLatency || 0) * 1e3)} ms. Output estimate: ${Math.round((audio.ctx.outputLatency || 0) * 1e3)} ms. Hardware and Bluetooth can add more delay.`;
+  $('#live-latency').textContent=audio.ctx.outputLatency>0?`Reported audio output: about ${Math.round(((audio.ctx.baseLatency||0)+audio.ctx.outputLatency)*1000)} ms. Device buffering may add more.`:`Browser buffer: ${Math.round((audio.ctx.baseLatency||0)*1000)} ms. Extra device delay is not reported.`;
 }
 function switchView(name) {
   if (view === "instruments" && name !== view) rack.releaseAll();
   view = name;
   document.body.dataset.view=name;
+  if(name==='instruments')attempt(readyInstrument)();
   $$(".view").forEach((e) => e.hidden = e.id !== "view-" + name);
   $$(".view-tabs [data-view]").forEach((e) => e.classList.toggle("active", e.dataset.view === name));
 }
@@ -172,6 +190,9 @@ function renderPadStates() {
     if (state) state.textContent = audio.pending.has(id) ? "◷" : audio.active.has(id) ? "Ⅱ" : "▷";
   }
   renderMixer();
+  const kickLayers=[...audio.active.keys()].filter(id=>session.pads[id].events.some(e=>e.voice==='kick'));
+  $('#seq-kick-layers').hidden=!kickLayers.length;
+  $('#seq-kick-layer-names').textContent=kickLayers.map(id=>session.pads[id].name).join(', ');
 }
 function renderMixer() {
   const container = $("#mixer");
@@ -318,6 +339,7 @@ function renderAll() {
   rack.render();
   $("#mixer").dataset.ids = "";
   renderMixer();
+  performanceTools.refresh();
 }
 function renderQuickPad() {
   for (const input of $$("#mixer input[data-pad-id]")) if (input !== document.activeElement) input.value = session.pads[Number(input.dataset.padId)].volume * 100;
@@ -551,6 +573,12 @@ function validateAction(a, remote = false) {
   if (!a || typeof a !== "object") return false;
   const id = Number.isInteger(a.id) && a.id >= 0 && a.id < 16;
   switch (a.type) {
+    case 'scenes':
+      try{return !remote&&Array.isArray(a.scenes)&&!!normalizeScenes(a.scenes);}catch{return false;}
+    case 'scene':
+      try{return !remote&&!!normalizeScenes([a.scene])&&Number.isFinite(a.beat)&&a.beat>=audio.position()-128&&a.beat<audio.position()+128;}catch{return false;}
+    case 'scenecancel':return !remote;
+    case 'groove':return a.beats===session.beats&&validPattern(a.pattern,a.beats)&&typeof a.enabled==='boolean';
     case "start":
       return !remote && Number.isFinite(a.epoch) && Math.abs(a.epoch - audio.now()) < 1e4;
     case "stop":
@@ -582,6 +610,7 @@ function validateAction(a, remote = false) {
       return id && typeof a.on === "boolean";
     case "setpad":
       try {
+        if(!Number.isInteger(a.pad?.id)||a.pad.id<0||a.pad.id>=16)return false;
         const copy = structuredClone(session);
         copy.pads[a.pad.id] = a.pad;
         validateSession(copy);
@@ -596,6 +625,13 @@ function validateAction(a, remote = false) {
 function applyAction(a) {
   if (!validateAction(a)) return;
   switch (a.type) {
+    case 'scenes':
+      session.scenes=normalizeScenes(a.scenes);if(audio.pendingScene&&!session.scenes.some(s=>s.id===audio.pendingScene.scene.id))audio.pendingScene=null;performanceTools.refresh();break;
+    case 'scene':
+      if(audio.running)audio.queueScene(a.scene,a.beat);performanceTools.refresh();break;
+    case 'scenecancel':audio.pendingScene=null;performanceTools.refresh();break;
+    case 'groove':
+      audio.pendingScene=null;audio.lastScene=null;session.pattern=structuredClone(a.pattern);session.seqEnabled=a.enabled;renderSequencer();renderTiming();performanceTools.refresh();break;
     case "start":
       audio.start(a.epoch);
       requestWake();
@@ -604,6 +640,7 @@ function applyAction(a) {
       audio.stop();
       break;
     case "stoploops":
+      audio.pendingScene=null;audio.lastScene=null;performanceTools.refresh();
       audio.active.clear();
       audio.pending.clear();
       for (let id = 0; id < 16; id++) audio.cancelPad(id);
@@ -623,6 +660,7 @@ function applyAction(a) {
         return;
       }
       const was = audio.running;
+      performanceTools.resetMemory();
       audio.stop(false);
       session.bpm = a.bpm;
       session.beats = a.beats;
@@ -634,6 +672,7 @@ function applyAction(a) {
       break;
     }
     case "pack":
+      performanceTools.resetMemory();
       audio.stop();
       session.pack = a.id;
       session.pads = makePads(a.id);
@@ -679,6 +718,7 @@ function applyAction(a) {
       rack.renderDrums();
       break;
     case "step":
+      audio.pendingScene=null;audio.lastScene=null;
       session.pattern[a.voice][a.index] = a.on;
       renderSequencer();
       break;
@@ -728,8 +768,9 @@ function performNote(event, time = audio.ctx.currentTime + 3e-3, alreadyPlayed =
   const e = { ...event, duration };
   if (!alreadyPlayed) audio.play(e, time);
   const at = audio.now() + (time - audio.ctx.currentTime) * 1e3;
+  performanceTools.remember(e,alreadyPlayed?audio.epoch+event.beat*spb*1000:at,audio.running?audio.epoch:null);
   if (recording?.kind === "notes") {
-    const beat = alreadyPlayed ? event.beat - recording.startBeat : (at - recording.start) / 1e3 / spb;
+    const beat = alreadyPlayed ? event.beat - recording.startBeat : (time - recording.startAudio) / spb;
     if (beat >= 0 && beat < session.beats * session.bars) recording.events.push({ ...e, beat: (alreadyPlayed ? Math.round(beat * 1e6) / 1e6 : quantizeBeat(beat)) % (session.beats * session.bars), duration: duration / spb });
   }
   if (jam.role) {
@@ -770,6 +811,11 @@ bind("#stop-loops", "click", () => {
   if (jam.role === "follower") throw new Error("The leader controls all loops. Tap a pad to stop that layer.");
   sendAction({ type: "stoploops" });
 });
+bind('#seq-stop-kicks','click',()=>{
+  const beat=nextBoundary(audio.position(),session.beats);
+  for(const id of audio.active.keys())if(session.pads[id].events.some(e=>e.voice==='kick'))sendAction({type:'pad',id,beat,on:false});
+});
+audio.addEventListener('scene',()=>{renderTiming();renderSequencer();performanceTools.refresh();changed();});
 async function changeTiming() {
   if (recording||startingRecording||writing) throw new Error("Finish recording before changing timing.");
   if (tempoPreparing) throw new Error("Preparing the previous tempo change.");
@@ -942,7 +988,7 @@ async function beginRecording(kind, target = null, asSynth = $('#recording-mode'
   const { startBeat } = planRecording(audio.position(), session.bpm, session.beats, session.bars, countIn);
   const start = audio.epoch + startBeat * beatDuration(session.bpm) * 1e3;
   const end = start + session.beats * session.bars * beatDuration(session.bpm) * 1e3;
-  recording = { kind, id, startBeat, start, end, events: [], mic, autoSynth:kind==='mic'&&asSynth, countIn: countIn > 0, bars: session.bars, beats: session.beats, startAudio: audio.ctx.currentTime + (start - audio.now()) / 1e3 };
+  recording = { kind, id, startBeat, start, end, events: [], mic, autoSynth:kind==='mic'&&asSynth, countIn: countIn > 0, bars: session.bars, beats: session.beats, startAudio: audio.timeForBeat(startBeat) };
   audio.capture = recording;
   $("#capture-btn").classList.add("recording");
   $("#mic-btn").classList.toggle("recording", kind === "mic");
@@ -1074,6 +1120,7 @@ bind("#project-file", "change", async () => {
   if (valid.pads.some((p) => p.audioId && !samples.some((s) => s.id === p.audioId))) throw new Error("Project is missing an audio sample.");
   audio.stop();
   session = valid;
+  performanceTools.resetMemory();
   renderAll();
   changed();
   $("#project-dialog").close();
@@ -1085,6 +1132,7 @@ bind("#project-new", "click", async () => {
   await exportProject(session, samples);
   audio.stop();
   session = defaultSession();
+  performanceTools.resetMemory();
   renderAll();
   changed();
   $("#project-dialog").close();
@@ -1142,7 +1190,7 @@ function tick() {
   clearTimeout(drawTimer);
   if (!document.hidden) {
     if (audio.running) {
-      const p = Math.max(0, audio.position()), beat = Math.floor(p) % session.beats;
+      const p = Math.max(0, audio.audiblePosition()), beat = Math.floor(p) % session.beats;
       const quarter = Math.floor(p * 4), stamp = session.beats + ':' + quarter;
       if (stamp !== lastQuarter) {
         lastQuarter = stamp;
@@ -1199,12 +1247,13 @@ jam.addEventListener("accepted", ({ detail }) => {
     const pending = audioImports.get(detail.action?.pad?.audioId);
     if (pending) await pending;
     await prepareSamples(actionSample(detail.action));
+    if(detail.action?.type==='scene')for(const id of detail.action.scene.padIds){await ensureSample(session.pads[id]?.audioId);if(session.pads[id]?.audioId)await audio.preparePad(id);}
     if (["timing", "stop", "pack"].includes(detail.action?.type)) await cancelRecording();
     applyAction(detail.action);
   }).catch((e) => toast(e.message, true));
 });
 function snapshot() {
-  return { type: "snapshot", session: structuredClone(session), running: audio.running, epoch: audio.epoch, active: [...audio.active], pending: [...audio.pending] };
+  return { type: "snapshot", session: structuredClone(session), running: audio.running, epoch: audio.epoch, active: [...audio.active], pending: [...audio.pending],scenePending:audio.pendingScene||null };
 }
 jam.addEventListener("welcome", attempt(async ({ detail: { conn } }) => {
   jam.send(conn, snapshot());
@@ -1217,6 +1266,7 @@ jam.addEventListener("snapshot", attempt(async ({ detail: s }) => {
   const local = { master: session.master, inputLatency: session.inputLatency, outputOffset: session.outputOffset, jamBuffer: session.jamBuffer };
   session = { ...valid, ...local };
   audio.session = session;
+  performanceTools.resetMemory();
   audio.stop();
   const entries = Array.isArray(s.active) ? s.active : [];
   audio.active = new Map(entries.filter((x) => Array.isArray(x) && Number.isInteger(x[0]) && x[0] >= 0 && x[0] < 16 && Number.isFinite(x[1]?.start)));
@@ -1225,6 +1275,7 @@ jam.addEventListener("snapshot", attempt(async ({ detail: s }) => {
   if (Array.isArray(s.pending)) {
     for (const [id, p] of s.pending) if (Number.isInteger(id) && id >= 0 && id < 16 && Number.isFinite(p?.beat) && typeof p.on === "boolean") audio.pending.set(id, p);
   }
+  if(s.scenePending&&Number.isFinite(s.scenePending.beat)&&s.scenePending.beat>=audio.position()-128&&s.scenePending.beat<audio.position()+128&&audio.running){try{audio.queueScene(s.scenePending.scene,s.scenePending.beat);}catch{}}
   renderAll();
   changed();
   toast("Joined the shared groove.");
