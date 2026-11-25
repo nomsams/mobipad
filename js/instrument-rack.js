@@ -226,9 +226,11 @@ class InstrumentRack {
     button.onpointerdown = this.safely(async (e) => {
       e.preventDefault();
       released = false;
-      button.setPointerCapture(e.pointerId);
       const key = "pointer:" + e.pointerId;
-      await this.press(note, key, voice);
+      const playing=this.press(note,key,voice);
+      button.classList.add('pressed');
+      button.setPointerCapture(e.pointerId);
+      await playing;
       if (released) this.release(key);
       else button.classList.add("pressed");
     });

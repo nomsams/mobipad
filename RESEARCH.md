@@ -45,3 +45,11 @@ Reverb uses native [Web Audio convolution](https://www.w3.org/TR/webaudio/#Convo
 The sequencer now anchors beat times once to AudioContext time, following the [Web Audio scheduling clock](https://www.w3.org/TR/webaudio/#dom-baseaudiocontext-currenttime), rather than recalculating each beat from a wall-clock reading. Peer clock updates slew gradually; interruptions rebuild the anchor. Visuals use [getOutputTimestamp](https://developer.mozilla.org/en-US/docs/Web/API/AudioContext/getOutputTimestamp) when available and reported latency otherwise. Kick pitch envelopes fall rapidly independently of their longer amplitude decay.
 
 [Ableton’s Bluetooth latency guidance](https://help.ableton.com/hc/en-us/articles/6130134332188-Bluetooth-Headphones-and-Latency-in-Note) explains why immediate live playing still suffers from wireless buffering. Mobipad removes software waits from warm pointer presses, but does not claim to remove device or Bluetooth delay.
+
+## Landscape performance and full screen
+
+Landscape Stage uses side rails and compares 4×4 and 8×2 arrangements using the actual available grid bounds. Maximizing the minimum pad dimension avoids narrow targets on wide, short phones while retaining larger 4×4 targets on tablets. Focus removes the surrounding controls but retains a small transport and exit strip, respecting safe-area insets and the visual viewport.
+
+The [Fullscreen API](https://developer.mozilla.org/en-US/docs/Web/API/Fullscreen_API) requires browser support and a user gesture. Mobipad requests hidden navigation UI and retains a browser fallback. Apple's [Home Screen web app instructions](https://support.apple.com/guide/iphone/iphea86e5236/ios) provide the Safari installation path when native full screen is unavailable. The manifest allows either orientation and prefers full-screen/standalone app windows.
+
+Instrument preparation uses a zero-gain audio route with separate source tracking, scheduled during idle time after audio unlock. It primes synthesis code and plucked-string caches without playing audible notes or consuming the live voice budget. It reduces avoidable first-use work but cannot change output hardware buffering.

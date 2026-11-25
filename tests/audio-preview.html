@@ -44,6 +44,11 @@ try{
  await converter.open(13,{automatic:true,startBeat:0});
  if(!generated?.replace||generated.events.length!==4||generated.events.some(e=>e.voice!=='synth'||e.sound!=='pure')||document.querySelector('#auto-timing').value!=='natural')throw new Error('Automatic take conversion failed');
  fields.remove();report('PASS · Automatic take conversion selected a pure, naturally timed synth loop.');
+ const silentContext=new OfflineAudioContext(1,rate,rate),silentEngine=new AudioEngine(defaultSession());silentEngine.ctx=silentContext;silentEngine.master=silentContext.createGain();silentEngine.master.connect(silentContext.destination);
+ silentEngine.play({voice:'piano',note:60,duration:.1,velocity:.7},.01,1,'warmup');
+ if(silentEngine.nodes.size!==0||silentEngine.warmNodes.size===0)throw new Error('Warm-up entered live polyphony');
+ const silence=await silentContext.startRendering();if(silence.getChannelData(0).some(v=>v!==0))throw new Error('Warm-up was audible');
+ report('PASS · Instrument warm-up rendered silence and stayed outside live polyphony.');
  report('ALL BROWSER AUDIO CHECKS PASSED');
 }catch(error){report('FAIL · '+error.message);console.error(error);}finally{engine?.stop();await engine?.ctx?.close();button.disabled=false;}
 };

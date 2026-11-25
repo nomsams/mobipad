@@ -16,14 +16,14 @@ import { analyzeRecording, trimSilence, planRecording, validSampleSettings } fro
 const $ = (s) => document.querySelector(s), $$ = (s) => [...document.querySelectorAll(s)];
 let seqErase = false;
 let tempoTimer = null, tempoPreparing = false;
-let operationVersion=0, startingRecording=null;
+let operationVersion=0, startingRecording=null, warmTimer=null, warmIdle=false;
 let session = defaultSession(), samples = [], view = "pads", mode = "loop", instrument = "piano", octave = 4, selected = 12, saveTimer, toastTimer, restoring = false, recording = null, mixRecorder = null, wakeLock = null, writing = false;
 const audio = new AudioEngine(session), jam = new JamRoom();
-const rack = new InstrumentRack({ audio, getSession: () => session, ready:readyInstrument, perform: performNote, changed, notify: toast, onVoice: (v) => instrument = v, changeSound: (voice, id) => sendAction({ type: "sound", voice, id }), changeKit: (id) => sendAction({ type: "kit", id }), startTransport: () => {
+const rack = new InstrumentRack({ audio, getSession: () => session, ready:readyInstrument, perform: performNote, changed, notify: toast, onVoice: (v) => {instrument=v;queueInstrumentWarm();}, changeSound: (voice, id) => sendAction({ type: "sound", voice, id }), changeKit: (id) => sendAction({ type: "kit", id }), startTransport: () => {
   if (jam.role === "follower") throw new Error("The leader needs to start the transport for the arpeggiator.");
   sendAction({ type: "start", epoch: audio.now() + 180 });
 } });
-const presentation = new Presentation({onResources:mode=>{audio.setResourceMode(mode);setDSPResourceMode(mode);},onStudio:()=>{if(view==='mixer')switchView('pads');},notify:toast});
+const presentation = new Presentation({onResources:mode=>{audio.setResourceMode(mode);setDSPResourceMode(mode);},onPads:()=>switchView('pads'),onStudio:()=>{if(view==='mixer')switchView('pads');},notify:toast});
 const autoSynth=new AutoSynth({audio,getSession:()=>session,ready,notify:toast,commit:async({source,events,config,replace})=>{
   const original=session.pads[source.id],id=replace?source.id:emptyPad();
   const pad={...session.pads[id],kind:'loop',name:(original.name+' · synth').slice(0,80),audioId:null,events,bars:original.bars,volume:.75,trimStart:undefined,trimEnd:undefined,alignment:undefined,trackAnalysis:undefined,sequenceEnabled:false,steps:[],preDelay:0,reverb:config.reverb,reverbSpace:config.reverbSpace,echo:config.echo,echoTime:config.echoTime};
@@ -92,9 +92,14 @@ async function ready(sampleId) {
   await prepareSamples(sampleId);
   updateAudioInfo();
 }
+function queueInstrumentWarm(){
+  if(warmTimer!==null){if(warmIdle)cancelIdleCallback(warmTimer);else clearTimeout(warmTimer);}
+  const run=()=>{warmTimer=null;if(view==='instruments'&&!document.hidden&&audio.ctx?.state==='running')audio.warmVoice(instrument);};
+  warmIdle=typeof requestIdleCallback==='function';warmTimer=warmIdle?requestIdleCallback(run,{timeout:300}):setTimeout(run,16);
+}
 async function readyInstrument(){
-  if(audio.ctx?.state==='running')return;
-  await audio.init();updateAudioInfo();
+  if(audio.ctx?.state!=='running'){await audio.init();updateAudioInfo();}
+  queueInstrumentWarm();
 }
 function updateAudioInfo(){
   $("#audio-status").textContent = `Audio ready · ${Math.round((audio.ctx.outputLatency || audio.ctx.baseLatency || 0) * 1e3)} ms output`;
@@ -102,6 +107,7 @@ function updateAudioInfo(){
   $('#live-latency').textContent=audio.ctx.outputLatency>0?`Reported audio output: about ${Math.round(((audio.ctx.baseLatency||0)+audio.ctx.outputLatency)*1000)} ms. Device buffering may add more.`:`Browser buffer: ${Math.round((audio.ctx.baseLatency||0)*1000)} ms. Extra device delay is not reported.`;
 }
 function switchView(name) {
+  if(name!=='pads'&&presentation.focused)presentation.setFocus(false);
   if (view === "instruments" && name !== view) rack.releaseAll();
   view = name;
   document.body.dataset.view=name;
@@ -708,11 +714,13 @@ function applyAction(a) {
     }
     case "sound":
       session.rack.sounds[a.voice] = a.id;
+      queueInstrumentWarm();
       rack.renderControls();
       rack.renderDrums();
       break;
     case "kit":
       session.rack.kit = a.id;
+      queueInstrumentWarm();
       for (const v of ["kick", "snare", "hat", "openhat", "clap", "tom", "rim"]) session.rack.sounds[v] = a.id;
       rack.renderControls();
       rack.renderDrums();
@@ -1075,6 +1083,7 @@ audio.addEventListener("transport", ({detail}) => {
   b.classList.toggle("playing", audio.running);
   b.firstChild.textContent = audio.running ? "Ⅱ" : "▶";
   b.setAttribute("aria-label", audio.running ? "Stop transport" : "Start transport");
+  presentation.syncFocus();
   $("#transport-status").textContent = audio.running ? "IN THE GROOVE" : "READY WHEN YOU ARE";
   renderPadStates();
   if (!audio.running) wakeLock?.release().catch(() => {
@@ -1171,6 +1180,7 @@ document.addEventListener("keydown", attempt(async (e) => {
     return;
   }
   if (e.key === "Escape") {
+    if(presentation.handleEscape())return;
     await cancelRecording();
     audio.stop();
     return;

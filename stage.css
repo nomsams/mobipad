@@ -85,3 +85,48 @@ body[data-resources=eco] dialog::backdrop{backdrop-filter:none}
 .piano-key,.drum-hit{touch-action:none;user-select:none;-webkit-user-select:none}
 
 .smart-drums{border:1px solid var(--line);border-radius:9px;padding:12px;margin-bottom:16px;background:#19201a}.smart-drums summary{cursor:pointer;color:var(--lime);font-weight:600}.smart-controls{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:14px 0}.smart-controls>label{flex:1;min-width:130px;margin:0}.groove-locks{display:flex;flex-wrap:wrap;gap:12px;border:0;padding:0;margin:14px 0}.groove-locks legend{font-size:12px;color:var(--muted);margin-bottom:8px}.groove-locks label{display:flex;gap:5px;align-items:center;margin:0;font-size:13px}.groove-locks input{width:16px;accent-color:var(--lime)}.scene-section{border-top:1px solid var(--line);margin-top:24px;padding-top:10px}.scene-list{display:grid;gap:8px;margin-bottom:16px}.scene-row{display:flex;gap:8px;align-items:center}.scene-launch{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}.scene-row small{font-size:11px;color:var(--muted);white-space:nowrap}.scene-row>button:last-child{padding:7px 12px}body[data-layout=compact] #performance-btn{width:30px;min-width:30px;height:32px;font-size:19px}
+
+#focus-toggle{display:none}.focus-controls{display:none}
+body[data-layout=compact][data-view=pads] #focus-toggle{display:inline-grid}
+body[data-layout=compact] #screen-toggle,body[data-layout=compact] #focus-toggle{width:30px;min-width:30px;height:32px;font-size:20px}
+body[data-layout=compact] .pad-grid{grid-template-columns:repeat(var(--pad-columns,4),minmax(0,1fr));grid-template-rows:repeat(var(--pad-rows,4),minmax(0,1fr))}
+#screen-toggle[aria-pressed=true],#focus-screen[aria-pressed=true]{color:var(--lime)}
+@media(max-width:480px){body[data-layout=compact] #layout-toggle,body[data-layout=compact] #resource-toggle{display:none}}
+
+/* Landscape spends height on pads; the transport and view navigation use edge rails. */
+body[data-layout=compact][data-orientation=landscape] .app-shell{padding-bottom:max(4px,env(safe-area-inset-bottom))}
+body[data-layout=compact][data-orientation=landscape] .app-header{height:36px;min-height:36px}
+body[data-layout=compact][data-orientation=landscape] main{display:grid;grid-template-columns:84px minmax(0,1fr) 64px;gap:6px}
+body[data-layout=compact][data-orientation=landscape] .transport{grid-column:1;min-height:0;height:100%;margin:0;padding:6px 4px;border-bottom:0;border-right:1px solid var(--line);display:flex;flex-direction:column;align-items:stretch;justify-content:space-between;gap:8px;overflow:hidden}
+body[data-layout=compact][data-orientation=landscape] .transport-play{display:grid;grid-template-columns:1fr 1fr;flex:none;gap:4px}
+body[data-layout=compact][data-orientation=landscape] .position{grid-column:1/-1;margin:4px 0 0;text-align:center}
+body[data-layout=compact][data-orientation=landscape] .position strong{font-size:12px}
+body[data-layout=compact][data-orientation=landscape] .position small{display:none}
+body[data-layout=compact][data-orientation=landscape] .transport-settings{justify-content:center;flex:none}
+body[data-layout=compact][data-orientation=landscape] .tempo-setting>div{justify-content:center}
+body[data-layout=compact][data-orientation=landscape] .transport-end{display:flex;flex-direction:column;gap:6px;align-items:center}
+body[data-layout=compact][data-orientation=landscape] .metro{width:100%;justify-content:center}
+body[data-layout=compact][data-orientation=landscape] .studio-layout{grid-column:2;height:100%;min-width:0}
+body[data-layout=compact][data-orientation=landscape] .view-tabs{left:auto;right:max(8px,env(safe-area-inset-right));top:calc(36px + env(safe-area-inset-top));bottom:max(4px,env(safe-area-inset-bottom));width:64px;height:auto;grid-template-columns:1fr;grid-template-rows:repeat(5,minmax(0,1fr));padding:4px 2px;border:0;border-left:1px solid var(--line);background:transparent}
+body[data-layout=compact][data-orientation=landscape] .view-tabs button{min-height:0;gap:3px}
+body[data-layout=compact][data-orientation=landscape] .view-tabs button>span{font-size:18px}
+body[data-layout=compact][data-orientation=landscape] #view-pads{gap:4px}
+body[data-layout=compact][data-orientation=landscape] .pad-grid{gap:4px}
+body[data-layout=compact][data-orientation=landscape] .pad{padding:7px}
+body[data-layout=compact][data-orientation=landscape] .pad-top{font-size:15px}
+body[data-layout=compact][data-orientation=landscape] .pad-name{font-size:clamp(11px,1.8vmin,16px)}
+body[data-layout=compact][data-orientation=landscape] .pad-inspector{min-height:42px}
+body[data-layout=compact][data-orientation=landscape] .pad-inspector button{height:38px;min-height:38px}
+
+/* Focus keeps every pad visible with one small, persistent escape/transport rail. */
+body[data-layout=compact][data-focus=true] .app-shell{padding:max(4px,env(safe-area-inset-top)) max(4px,env(safe-area-inset-right)) calc(48px + env(safe-area-inset-bottom)) max(4px,env(safe-area-inset-left))}
+body[data-layout=compact][data-focus=true] .app-header,body[data-layout=compact][data-focus=true] .transport,body[data-layout=compact][data-focus=true] .view-tabs,body[data-layout=compact][data-focus=true] #view-pads>.section-bar,body[data-layout=compact][data-focus=true] .pad-inspector{display:none}
+body[data-layout=compact][data-focus=true] main{display:block;height:100%}
+body[data-layout=compact][data-focus=true] .studio-layout,body[data-layout=compact][data-focus=true] .workspace,body[data-layout=compact][data-focus=true] #view-pads{height:100%;width:100%}
+body[data-layout=compact][data-focus=true] #view-pads{gap:0}
+body[data-layout=compact][data-focus=true] .focus-controls{display:flex;position:fixed;z-index:70;left:max(4px,env(safe-area-inset-left));right:max(4px,env(safe-area-inset-right));top:auto;bottom:env(safe-area-inset-bottom);width:auto;height:44px;flex-direction:row;align-items:center;justify-content:center;gap:6px;background:#111813}
+body[data-layout=compact][data-focus=true][data-orientation=landscape] .app-shell{padding-bottom:max(4px,env(safe-area-inset-bottom));padding-left:calc(48px + env(safe-area-inset-left))}
+body[data-layout=compact][data-focus=true][data-orientation=landscape] .focus-controls{left:env(safe-area-inset-left);right:auto;top:max(4px,env(safe-area-inset-top));bottom:max(4px,env(safe-area-inset-bottom));width:44px;height:auto;flex-direction:column}
+.focus-controls button{width:40px;height:40px;min-height:40px;padding:0;font-size:21px;line-height:1;touch-action:manipulation}
+.focus-controls button[aria-pressed=true]{color:var(--lime);border-color:#647e47}
+@media(max-height:300px){body[data-layout=compact][data-orientation=landscape] .transport{gap:3px;padding-top:3px;padding-bottom:3px}body[data-layout=compact][data-orientation=landscape] .view-tabs button{font-size:10px}body[data-layout=compact][data-orientation=landscape] .pad-top{display:none}.focus-controls button{height:34px;min-height:34px}.focus-controls{gap:3px!important}}

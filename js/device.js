@@ -12,5 +12,14 @@ export function resolvePresentation(preferences={},environment={}){
   return {device,layout,resources};
 }
 export function normalizePreferences(input){return {layout:['auto','compact','studio'].includes(input?.layout)?input.layout:'auto',resources:['auto','eco','full'].includes(input?.resources)?input.resources:'auto'};}
+export function choosePadGrid(width,height,landscape=false,gap=6){
+  if(!landscape||!(width>0&&height>0))return {columns:4,rows:4};
+  let best={columns:4,rows:4},size=-Infinity;
+  for(const columns of [4,8]){
+    const rows=16/columns,side=Math.min((width-(columns-1)*gap)/columns,(height-(rows-1)*gap)/rows);
+    if(side>size){best={columns,rows};size=side;}
+  }
+  return best;
+}
 const MiB=1024*1024;
 export const resourceProfiles={eco:{fps:12,maxSources:160,rawBytes:32*MiB,stringBytes:8*MiB,processedBytes:12*MiB,stretchBytes:32*MiB,workerIdle:15000},full:{fps:30,maxSources:384,rawBytes:128*MiB,stringBytes:32*MiB,processedBytes:32*MiB,stretchBytes:128*MiB,workerIdle:60000}};

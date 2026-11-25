@@ -16,6 +16,7 @@ class AudioEngine extends EventTarget {
     this.pending = /* @__PURE__ */ new Map();
     this.buffers = new AudioCache(resourceProfiles.full.rawBytes,key=>this.isSamplePinned(key));
     this.nodes = /* @__PURE__ */ new Set();
+    this.warmNodes=new Set();this.warmedVoices=new Set();
     this.running = false;
     this.epoch = 0;
     this.clockOffset = 0;
@@ -124,13 +125,14 @@ class AudioEngine extends EventTarget {
     this.running = false;
     this.audioEpoch=null;
     this.interrupted=false;
-    for (const n of this.nodes) {
+    for (const n of [...this.nodes,...this.warmNodes]) {
       try {
         n.stop();
       } catch {
       }
     }
     this.nodes.clear();
+    this.warmNodes.clear();
     this.pending.clear();
     this.pendingScene=null;this.scenePreparing=null;this.lastScene=null;
     // Recreate delay lines so Stop also clears audio still circulating in feedback.
@@ -153,6 +155,10 @@ class AudioEngine extends EventTarget {
     }
   }
   bus(id) {
+    if(id==='warmup'){
+      if(!this.warmBus){this.warmBus=this.ctx.createGain();this.warmBus.gain.value=0;this.warmBus.connect(this.master);}
+      return this.warmBus;
+    }
     if (typeof id!=='number') return this.master;
     this.padBuses ??= /* @__PURE__ */ new Map();
     if (!this.padBuses.has(id)) {
@@ -445,13 +451,23 @@ class AudioEngine extends EventTarget {
   }
   track(source, gain, id) {
     source.padId = id;
-    this.nodes.add(source);
+    const collection=id==='warmup'?this.warmNodes:this.nodes;collection.add(source);
     source.onended = () => {
       source.disconnect();
       gain?.disconnect();
-      this.nodes.delete(source);
+      collection.delete(source);
     };
+    if(id==='warmup')return;
     while(this.nodes.size>this.maxSources){const oldest=[...this.nodes].find(n=>n!==source&&!n.loopVoice);if(!oldest)break;try{oldest.stop();}catch{}this.nodes.delete(oldest);}
+  }
+  warmVoice(voice){
+    if(this.ctx?.state!=='running')return false;
+    const voices=voice==='drums'?['kick','hat']:[voice],rack=this.session.rack;
+    const key=voices.map(v=>v+':'+rack.sounds[v]).join('|');if(this.warmedVoices.has(key))return false;
+    try{
+      for(const v of voices)this.play({voice:v,note:v==='bass'?28:v==='guitar'?40:60,sound:rack.sounds[v],duration:.08,velocity:.4},this.ctx.currentTime+.004,1,'warmup');
+      this.warmedVoices.add(key);if(this.warmedVoices.size>64)this.warmedVoices.delete(this.warmedVoices.values().next().value);return true;
+    }catch{return false;} // A failed optional warm-up never blocks a real instrument press.
   }
   play(e, time = this.ctx.currentTime + 3e-3, level = 1, id = null) {
     const c = this.ctx, t = Math.max(time, c.currentTime), v = Math.max(1e-3, (e.velocity ?? 0.7) * (id === null ? level : 1)), voice = e.voice;

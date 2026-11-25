@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {classifyDevice,resolvePresentation,normalizePreferences,resourceProfiles} from '../js/device.js';
+import {classifyDevice,resolvePresentation,normalizePreferences,resourceProfiles,choosePadGrid} from '../js/device.js';
 import {AudioCache,audioBytes} from '../js/audio-cache.js';
 import {AudioEngine} from '../js/engine.js';
 import {defaultSession} from '../js/presets.js';
@@ -8,6 +8,17 @@ import {defaultSession} from '../js/presets.js';
 test('iPads using desktop Safari identification default to vertical Stage even with a mouse',()=>{
   for(const coarse of [true,false])assert.deepEqual(resolvePresentation({}, {width:1366,height:1024,platform:'MacIntel',touchPoints:5,coarse}),{device:'tablet',layout:'compact',resources:'eco'});
   assert.equal(classifyDevice({userAgent:'Mozilla iPad',width:1024}),'tablet');
+});
+test('landscape chooses the pad arrangement with the largest minimum touch dimension',()=>{
+  assert.deepEqual(choosePadGrid(668,270,true,4),{columns:8,rows:2});
+  assert.deepEqual(choosePadGrid(392,196,true,4),{columns:4,rows:4});
+  assert.deepEqual(choosePadGrid(1200,900,true),{columns:4,rows:4});
+  assert.deepEqual(choosePadGrid(390,650,false),{columns:4,rows:4});
+  assert.deepEqual(choosePadGrid(0,0,true),{columns:4,rows:4});
+  for(const [width,height] of [[668,270],[392,196],[1200,900],[792,382]]){
+    const grid=choosePadGrid(width,height,true,4),size=(columns)=>Math.min((width-(columns-1)*4)/columns,(height-(16/columns-1)*4)/(16/columns));
+    assert.equal(grid.columns*grid.rows,16);assert.ok(size(grid.columns)>=size(grid.columns===4?8:4));
+  }
 });
 test('phones, Android tablets and touch tablets use Stage in both orientations',()=>{
   for(const [width,height] of [[390,844],[844,390]])assert.equal(resolvePresentation({}, {width,height,userAgent:'Android Mobile',touchPoints:5}).layout,'compact');
